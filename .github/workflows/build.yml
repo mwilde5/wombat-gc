@@ -1,0 +1,115 @@
+# Builds the Windows installer and the macOS apps (Apple Silicon + Intel).
+#  - Every push to main and every pull request: build + self-test, installers kept as workflow artifacts.
+#  - Pushing a tag like v2.0.0: also publishes a GitHub Release with the installers attached.
+#  - "Run workflow" button on the Actions tab: build on demand.
+name: Build installers
+run-name: ${{ inputs.release && format('WombatGC {0} (release)', inputs.release) || (startsWith(github.ref, 'refs/tags/') && format('WombatGC {0} (release)', github.ref_name) || format('Test build ({0})', github.ref_name)) }}
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release with this version tag, e.g. v2.0.1 (leave empty for a test build)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-15
+            label: macOS-AppleSilicon
+          - os: macos-15-intel
+            label: macOS-Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Version
+        id: ver
+        shell: bash
+        run: echo "version=$(python -c 'import common; print(common.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Build app (PyInstaller)
+        run: pyinstaller --noconfirm --clean packaging/wombatgc.spec
+
+      # ---------------- Windows ----------------
+      - name: Self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          ./dist/WombatGC/WombatGC.exe --selftest || (cat wombatgc-selftest.log; exit 1)
+          cat wombatgc-selftest.log
+
+      - name: Installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" packaging\wombatgc.iss
+
+      # ---------------- macOS ----------------
+      - name: Sign (ad hoc) and self-test (macOS)
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          codesign --force --deep --sign - dist/WombatGC.app
+          ./dist/WombatGC.app/Contents/MacOS/WombatGC --selftest || (cat wombatgc-selftest.log; exit 1)
+          cat wombatgc-selftest.log
+
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p installers dmg
+          cp -R dist/WombatGC.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "WombatGC" -srcfolder dmg -ov -format UDZO \
+            "installers/WombatGC-${{ steps.ver.outputs.version }}-${{ matrix.label }}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WombatGC-${{ steps.ver.outputs.version }}-${{ matrix.label }}
+          path: installers/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release || github.ref_name }}
+          name: WombatGC ${{ inputs.release || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          files: out/*
+          generate_release_notes: true
