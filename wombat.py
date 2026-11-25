@@ -379,6 +379,34 @@ def selftest(ctl, app):
         except Exception:
             ok = False
             print(f"selftest open {p}: FAILED\n{traceback.format_exc()}", flush=True)
+    # every export format: images, Excel, 3D models
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="wombatgc_selftest_")
+    try:
+        import numpy as np
+        import plots_export as px
+        import tables
+        import mesh_export
+        import colormaps
+        t = np.linspace(0, 10, 500)
+        y = np.exp(-((t - 5) / 0.3) ** 2)
+        for ext in (".png", ".tif", ".svg", ".pdf"):
+            fn = os.path.join(tmp, "chrom" + ext)
+            px.chromatogram_figure(fn, t, y, title="selftest", dpi=100)
+            ok_f = os.path.getsize(fn) > 0
+            ok &= ok_f
+            print(f"selftest export {ext}: {'ok' if ok_f else 'EMPTY'}", flush=True)
+        fn = os.path.join(tmp, "table.xlsx")
+        tables.write_xlsx(fn, ["a", "b"], [[1, 2], [3, 4]], [("meta", "x")])
+        print(f"selftest export .xlsx: {'ok' if os.path.getsize(fn) > 0 else 'EMPTY'}", flush=True)
+        Z = np.outer(np.hanning(20), np.hanning(30))
+        mesh = mesh_export.build_mesh(Z, 100, 60, 30, 2, stops=colormaps.PRESETS[colormaps.DEFAULT], base_color="#888888")
+        for name, fn_ in (("glb", mesh_export.to_glb), ("stl", mesh_export.to_stl)):
+            data = fn_(mesh)
+            print(f"selftest export .{name}: {'ok' if len(data) > 0 else 'EMPTY'}", flush=True)
+    except Exception:
+        ok = False
+        print(f"selftest exports: FAILED\n{traceback.format_exc()}", flush=True)
     for mod in ("nmrglue", "openpyxl", "opentfraw", "brukeropusreader", "rainbow", "scipy.signal", "matplotlib.pyplot"):
         try:
             importlib.import_module(mod)

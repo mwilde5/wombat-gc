@@ -17,7 +17,11 @@ hidden = app_modules + collect_submodules("pyqtgraph", filter=lambda m: ".exampl
     + collect_submodules("nmrglue", filter=lambda m: ".tests" not in m) \
     + collect_submodules("rainbow") + collect_submodules("brukeropusreader") + collect_submodules("opentfraw") \
     + ["OpenGL", "OpenGL.GL", "OpenGL.arrays.numpymodule", "openpyxl", "scipy.signal", "scipy.ndimage",
-       "scipy.optimize", "scipy.io", "scipy.interpolate"]
+       "scipy.optimize", "scipy.io", "scipy.interpolate",
+       # matplotlib picks its file writer by extension at run time, so PyInstaller can't see these
+       "matplotlib.backends.backend_agg", "matplotlib.backends.backend_pdf", "matplotlib.backends.backend_svg",
+       "matplotlib.backends.backend_ps", "matplotlib.backends.backend_mixed",
+       "PIL.PngImagePlugin", "PIL.TiffImagePlugin", "PIL.JpegImagePlugin"]
 datas = collect_data_files("pyqtgraph", excludes=["**/examples/**", "**/tests/**"]) \
     + collect_data_files("openpyxl") + [(os.path.join(ROOT, "icon.png"), ".")]
 
