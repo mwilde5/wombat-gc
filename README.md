@@ -258,7 +258,7 @@ Every data window has a **Report** menu.
 - **Template prompts:** grey items are prompts and are left out of the export until you edit them.
 - **Adding content:** new content goes after the selected item. If nothing is selected, it goes at the end of the *Results* section. *Insert* adds headings, text (bold, italic, superscript, subscript and common symbols), editable tables, images and page breaks. Drag items in *Contents* to reorder them.
 - **Export:** PDF or Word (.docx). Figures and tables are numbered automatically. Images keep their full resolution: they are stored losslessly, not as JPEG. The header and footer carry the letterhead (client reports), report number or student name, and page numbers.
-- **Letterhead ▸ Logo… / Organisation name and address…** set the logo and the address block for client reports. These are saved on each computer, not in the report file, so the logo file isn't distributed with the app.
+- **Logo:** *Upload logo…* (under *Report details*) adds your organisation's logo (PNG, JPEG or SVG) to the top of client reports; *Address…* sets the name and address shown beside it. Both are kept on that computer for every future report, so the original file can be moved or deleted. *Letterhead ▸ Use the logo on student reports too* adds it to student reports.
 - **Save** (.wgreport) keeps the whole report, images included, so you can come back to it.
 
 ## Exporting tabulated data

@@ -207,6 +207,36 @@ def letterhead():
     return s.value("report/logo", "") or "", lines
 
 
+def get_logo():
+    """The uploaded logo (kept inside the app's settings, so it doesn't matter if the original file moves)."""
+    s = settings()
+    data = s.value("report/logo_png", "") or ""
+    if data:
+        img = QtGui.QImage.fromData(base64.b64decode(data))
+        if not img.isNull():
+            return img
+    return load_logo(s.value("report/logo", "") or "")
+
+
+def set_logo(path):
+    """Upload a logo from a PNG / JPEG / SVG file. Returns the image, or None if it can't be read."""
+    img = load_logo(path)
+    if img is None:
+        return None
+    if img.height() > 600:                   # plenty for a 15 mm high header at 1000 dpi
+        img = img.scaledToHeight(600, QtCore.Qt.SmoothTransformation)
+    s = settings()
+    s.setValue("report/logo_png", base64.b64encode(png_bytes(img)).decode("ascii"))
+    s.remove("report/logo")
+    return img
+
+
+def clear_logo():
+    s = settings()
+    s.remove("report/logo_png")
+    s.remove("report/logo")
+
+
 def load_logo(path):
     if not path or not os.path.exists(path):
         return None
@@ -349,8 +379,8 @@ def export_pdf(rep: Report, path, dpi=300):
     p.setRenderHint(QtGui.QPainter.LosslessImageRendering, True)     # keep figures PNG-sharp, no JPEG
     p.setRenderHint(QtGui.QPainter.Antialiasing, True)
     k = dpi / 96.0
-    logo_path, lines = letterhead()
-    logo = load_logo(logo_path) if rep.style == "client" or settings().value("report/logo_student", "false") == "true" \
+    _, lines = letterhead()
+    logo = get_logo() if rep.style == "client" or settings().value("report/logo_student", "false") == "true" \
         else None
     body_h = (PAGE_H - MARGIN_T - MARGIN_B) * MM_PX
     small = _font(8)
@@ -439,7 +469,7 @@ def export_docx(rep: Report, path):
     # header: logo left, facility right
     logo_path, lines = letterhead()
     use_logo = rep.style == "client" or settings().value("report/logo_student", "false") == "true"
-    logo = load_logo(logo_path) if use_logo else None
+    logo = get_logo() if use_logo else None
     hdr = sec.header
     ht = hdr.add_table(rows=1, cols=2, width=Mm(BODY_W))
     ht.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -694,8 +724,8 @@ class ReportWindow(QtWidgets.QMainWindow):
                                                         rows=[["", "", ""], ["", "", ""]])))
         im.addAction("Page break", lambda: self.insert(Block("pagebreak")))
         lm = mb.addMenu("&Letterhead")
-        lm.addAction("Logo…", self.choose_logo)
-        lm.addAction("Remove logo", lambda: (self.settings.remove("report/logo"), self._refresh_preview()))
+        lm.addAction("Upload logo…", self.choose_logo)
+        lm.addAction("Remove logo", self.remove_logo)
         lm.addAction("Organisation name and address…", self.edit_facility)
         self.act_logo_student = lm.addAction("Use the logo on student reports too")
         self.act_logo_student.setCheckable(True)
@@ -724,6 +754,29 @@ class ReportWindow(QtWidgets.QMainWindow):
         self.fields_box = QtWidgets.QGroupBox("Report details")
         self.fields_form = QtWidgets.QFormLayout(self.fields_box)
         lv.addWidget(self.fields_box)
+        lh = QtWidgets.QGroupBox("Logo")
+        lh.setToolTip("Shown at the top of client reports (and student reports if you tick "
+                      "Letterhead ▸ Use the logo on student reports too). It is kept on this computer "
+                      "for all future reports.")
+        hl = QtWidgets.QHBoxLayout(lh)
+        self.logo_thumb = QtWidgets.QLabel()
+        self.logo_thumb.setFixedSize(156, 44)
+        self.logo_thumb.setAlignment(QtCore.Qt.AlignCenter)
+        self.logo_thumb.setStyleSheet("background:white; border:1px solid #ccc; color:#999;")
+        hl.addWidget(self.logo_thumb)
+        b = QtWidgets.QPushButton("Upload logo…")
+        b.setToolTip("Choose a PNG, JPEG or SVG file")
+        b.clicked.connect(lambda: self.choose_logo())
+        hl.addWidget(b)
+        self.btn_logo_rm = QtWidgets.QPushButton("Remove")
+        self.btn_logo_rm.clicked.connect(self.remove_logo)
+        hl.addWidget(self.btn_logo_rm)
+        b = QtWidgets.QPushButton("Address…")
+        b.setToolTip("Organisation name and address shown at the top right of client reports")
+        b.clicked.connect(self.edit_facility)
+        hl.addWidget(b)
+        hl.addStretch(1)
+        lv.addWidget(lh)
         lv.addWidget(QtWidgets.QLabel("<b>Contents</b>  (drag to reorder)"))
         self.list = QtWidgets.QListWidget()
         self.list.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
@@ -852,6 +905,7 @@ class ReportWindow(QtWidgets.QMainWindow):
         split.setSizes([430, 800])
         self.setCentralWidget(split)
         self.status = self.statusBar()
+        self._show_logo()
 
     # ---------------------------------------------------------------- report <-> UI
     def _load_report(self):
@@ -1219,16 +1273,36 @@ class ReportWindow(QtWidgets.QMainWindow):
         deliver("figure", dict(kind="image", path=fn, caption=b.text, source="report"), self)
 
     # ---------------------------------------------------------------- letterhead
-    def choose_logo(self):
-        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose logo", "",
-                                                      "Images (*.png *.jpg *.jpeg *.svg)")
-        if fn:
-            if load_logo(fn) is None:
-                QtWidgets.QMessageBox.warning(self, APP_NAME, "That file couldn't be read as an image.")
-                return
-            self.settings.setValue("report/logo", fn)
-            self.status.showMessage("Logo set – it appears in the header of client reports", 5000)
-            self._refresh_preview()
+    def choose_logo(self, fn=None):
+        if not fn:
+            fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Upload logo", self.settings.value("open_dir", os.path.expanduser("~")),
+                "Images (*.png *.jpg *.jpeg *.svg)")
+        if not fn:
+            return
+        if set_logo(fn) is None:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "That file couldn't be read as an image "
+                                                          "(use PNG, JPEG or SVG).")
+            return
+        self._show_logo()
+        self.status.showMessage("Logo uploaded – it appears at the top of every client report", 6000)
+        self._refresh_preview()
+
+    def remove_logo(self):
+        clear_logo()
+        self._show_logo()
+        self._refresh_preview()
+
+    def _show_logo(self):
+        img = get_logo()
+        if img is None:
+            self.logo_thumb.setPixmap(QtGui.QPixmap())
+            self.logo_thumb.setText("No logo")
+            self.btn_logo_rm.setEnabled(False)
+        else:
+            self.logo_thumb.setPixmap(QtGui.QPixmap.fromImage(img.scaled(
+                150, 40, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)))
+            self.btn_logo_rm.setEnabled(True)
 
     def edit_facility(self):
         cur = self.settings.value("report/facility", "University of Plymouth")
@@ -1248,7 +1322,7 @@ class ReportWindow(QtWidgets.QMainWindow):
         head = ""
         logo_path, lines = letterhead()
         if self.rep.style == "client" or self.act_logo_student.isChecked():
-            img = load_logo(logo_path)
+            img = get_logo()
             if img is not None:
                 doc.addResource(QtGui.QTextDocument.ImageResource, QtCore.QUrl("logo"), img)
                 hpx = 15 * MM_PX
@@ -1351,8 +1425,8 @@ class ReportWindow(QtWidgets.QMainWindow):
         return fn
 
     def _warn_logo(self):
-        if self.rep.style == "client" and load_logo(letterhead()[0]) is None:
-            self.status.showMessage("No logo set – choose one with Letterhead ▸ Logo…", 8000)
+        if self.rep.style == "client" and get_logo() is None:
+            self.status.showMessage("No logo uploaded – use Upload logo… under Report details", 8000)
 
     def export_pdf(self, fn=None):
         fn = fn or self._export_name(".pdf", "PDF (*.pdf)")
