@@ -1,0 +1,27 @@
+{
+  "name": "wombatgc-structure-editor",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "events": "3.3.0",
+    "ketcher-core": "3.21.0",
+    "ketcher-react": "3.21.0",
+    "ketcher-standalone": "3.21.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "ketcher-macromolecules": "3.21.0",
+    "raphael": "2.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "vite": "5.4.11"
+  },
+  "overrides": {
+    "ketcher-core": "3.21.0",
+    "ketcher-macromolecules": "3.21.0"
+  }
+}

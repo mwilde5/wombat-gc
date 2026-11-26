@@ -7,3 +7,5 @@ dist/
 .DS_Store
 installed-requirements.txt
 wombatgc-selftest.log
+ketcher_app/dist
+ketcher_app/node_modules

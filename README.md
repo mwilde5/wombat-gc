@@ -12,7 +12,7 @@ A desktop app for analytical data, for teaching and research. The start screen a
 | **CSV / text** | any columns of numbers: you choose the columns and the kind of data |
 | **Compare samples** | up to 5 chromatograms (GC, GCxGC or LC-MS) side by side, with their mass spectra |
 
-Every technique has publication-quality image export (PNG/TIFF at any dpi, SVG/PDF) and tables that export to Excel or paste straight into Word (see *Exporting tabulated data*). The **figure maker** puts plots, structures, labels and arrows together on one page, and the **report builder** turns figures, tables and report text into a student or client report (PDF or Word). See *Figures and reports*.
+Every technique has publication-quality image export (PNG/TIFF at any dpi, SVG/PDF) and tables that export to Excel or paste straight into Word (see *Exporting tabulated data*). The **structure editor** draws structures and reaction schemes, the **figure maker** puts plots, structures, labels and arrows together on one page, and the **report builder** turns figures, tables and report text into a student or client report (PDF or Word). See *Figures and reports*.
 
 ## Installing it (students and staff)
 
@@ -31,6 +31,8 @@ Everything is included; you don't need Python. To check which Mac you have: Appl
 **Mac / Linux:** double-click `start_wombatgc.command` (or run it from Terminal). The first run sets up Python packages the same way. On a Mac, install Python from python.org first (the `python3` that comes with macOS is too old). The first time, macOS may refuse to open the file because it was downloaded: right-click it and choose **Open**, or allow it in **System Settings ▸ Privacy & Security**. NIST MS Search is Windows-only; everything else works on both.
 
 **Manual setup:** `pip install -r requirements.txt`, then `python wombat.py [file]`.
+
+**Structure editor from the source code:** the installers include it. To use it when running from the source code, install [Node.js](https://nodejs.org) and build it once with `cd ketcher_app`, `npm ci`, `npm run build`.
 
 You need Python 3.10–3.13 (Windows or Mac). If it isn't installed, install it from python.org or the university Software Center, and tick *Add python.exe to PATH* during installation.
 
@@ -240,6 +242,19 @@ Every data window has a **Report** menu.
 - **Add … to report** sends the chromatogram, spectrum, peak table, NMR multiplet table or NMR / IR report text to the report builder. Images use the normal image dialog (zoom, labels, size, 600 dpi by default). The title you type there becomes the figure caption.
 - **Send … to the figure maker** places the plot on the figure maker's page as a vector graphic.
 
+### Structure editor
+
+The structure editor is on the start screen, or under *Draw structure…* in the figure maker and the report builder. It is [Ketcher](https://lifescience.opensource.epam.com/ketcher/) (EPAM Systems), built into the app, and works without an internet connection.
+
+- **Drawing:** atoms, bonds, rings, charges and stereo bonds. You can also draw reaction schemes: reaction and equilibrium arrows, and + signs, e.g. keto ⇌ enol tautomerism.
+- **Opening structures:** MOL, SDF, RXN, CDXML, KET and SMILES files, or *File ▸ Enter SMILES*.
+- **Properties:** formula, molecular weight, exact (monoisotopic) mass, SMILES, and the m/z of common adducts ([M+H]⁺, [M+Na]⁺, [M−H]⁻ …). Double-click an adduct row to plot its extracted-ion chromatogram in an open LC-MS window.
+- **Using the drawing:**
+  - *Insert into figure maker*: the structure is added as a vector graphic. Double-click it there later to edit it; *Update figure* puts it back at the same size.
+  - *Add to report*: adds it at 600 dpi.
+  - *Copy image*: pastes into Word or PowerPoint.
+  - *Save image*: PNG, TIFF or SVG. Molecules can also be saved as MOL and reactions as RXN.
+
 ### Figure maker
 
 - **Pictures:** *Picture…* inserts structures or pictures (PNG, JPEG, SVG). *Paste* (Ctrl+V) inserts a structure copied from a drawing program. You can also drag a file onto the page.
@@ -282,6 +297,7 @@ Every table (integrated peaks, GCxGC blobs, NMR multiplets and peaks, IR bands, 
 | `drag_labels.py` | draggable plot labels and label auto-arrangement |
 | `figure_maker.py` | the figure maker |
 | `report_builder.py` | the report builder (PDF and Word export) |
+| `structure_editor.py`, `ketcher_app/` | the structure editor window, and the Ketcher web app it runs (built with npm) |
 | `gcms_reader.py` | file readers. These can be used on their own in scripts, e.g. `run = read_d("x.D"); run.tic; run.spectrum(i); run.eic(176)` |
 | `integration.py` | integration maths |
 | `plots_export.py` | publication-figure export (matplotlib) |
@@ -299,4 +315,4 @@ MassHunter files are read with the open-source [rainbow-api](https://pypi.org/pr
 
 ### Licences of the libraries used
 
-numpy, scipy, nmrglue, PyOpenGL (BSD); matplotlib (PSF-style); pyqtgraph, openpyxl, python-docx (MIT); PySide6, rainbow-api (LGPL-3.0); opentfraw (Apache-2.0); brukeropusreader (GPL-3.0).
+numpy, scipy, nmrglue, PyOpenGL (BSD); matplotlib (PSF-style); pyqtgraph, openpyxl, python-docx (MIT); PySide6, rainbow-api (LGPL-3.0); opentfraw, Ketcher (Apache-2.0); React (MIT); brukeropusreader (GPL-3.0).

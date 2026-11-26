@@ -122,6 +122,8 @@ class StartWindow(QtWidgets.QWidget):
         tools.setSpacing(10)
         for title, desc, target in (("Figure maker", "Plots, structures, labels, arrows and captions\n"
                                                      "on one page, exported as a high-resolution image", "figure"),
+                                    ("Structure editor", "Draw structures and reaction schemes;\n"
+                                                         "formula, exact mass and adduct m/z", "structure"),
                                     ("Report builder", "Student and client reports with your figures\n"
                                                        "and tables, exported as PDF or Word", "report")):
             b = self._card(title, desc, True)
@@ -294,6 +296,13 @@ class AppController(QtCore.QObject):
         return w
 
     def open_tool(self, target, path=None):
+        if target == "structure":
+            import structure_editor
+            w = structure_editor.open_editor()
+            if path:
+                w.sigReady.connect(lambda: w.open_file(path), QtCore.Qt.SingleShotConnection) if not w.ready \
+                    else w.open_file(path)
+            return w
         import report_builder
         w = report_builder.deliver(target, None)
         if path:
@@ -302,6 +311,9 @@ class AppController(QtCore.QObject):
 
     def open_path(self, path):
         low = path.lower()
+        if low.endswith((".mol", ".sdf", ".rxn", ".ket", ".cdxml")):
+            self.start.hide()
+            return self.open_tool("structure", path)
         if low.endswith((".wgfig", ".wgreport")):
             self.start.hide()
             self.add_recent(path)
@@ -464,6 +476,40 @@ def selftest(ctl, app):
     except Exception:
         ok = False
         print(f"selftest report/figure: FAILED\n{traceback.format_exc()}", flush=True)
+    # structure editor (Ketcher in Qt WebEngine)
+    try:
+        import structure_editor as se
+        if se.ketcher_dir() is None:
+            raise RuntimeError("the built editor (ketcher) is missing")
+        w = se.open_editor()
+        t = QtCore.QElapsedTimer()
+        t.start()
+        while not w.ready and t.elapsed() < 120000:
+            app.processEvents()
+            QtCore.QThread.msleep(20)
+        if not w.ready:
+            raise RuntimeError("editor did not start within 120 s")
+        print(f"selftest structure editor start: ok ({t.elapsed() / 1000:.1f} s)", flush=True)
+        res = {}
+        w.set_structure("CC(=O)CC(C)=O>>CC(O)=CC(C)=O", lambda: res.setdefault("set", True))
+        while "set" not in res and t.elapsed() < 150000:
+            app.processEvents()
+            QtCore.QThread.msleep(20)
+        w.snapshot(lambda s: res.__setitem__("snap", s), images=True)
+        while "snap" not in res and t.elapsed() < 180000:
+            app.processEvents()
+            QtCore.QThread.msleep(20)
+        snap = res.get("snap") or {}
+        good = "C5 H8 O2" in str(snap.get("formula")) and "<svg" in (snap.get("svg") or "")
+        img = se.render_svg(snap["svg"].encode("utf-8"), 150) if good else None
+        good = good and img is not None and not img.isNull()
+        ok &= good
+        print(f"selftest structure editor drawing: {'ok' if good else 'FAILED'} "
+              f"({snap.get('formula')}, {len(snap.get('svg') or '')} bytes SVG)", flush=True)
+        w.close()
+    except Exception:
+        ok = False
+        print(f"selftest structure editor: FAILED\n{traceback.format_exc()}", flush=True)
     for mod in ("docx", "nmrglue", "openpyxl", "opentfraw", "brukeropusreader", "rainbow", "scipy.signal", "matplotlib.pyplot"):
         try:
             importlib.import_module(mod)
@@ -478,6 +524,12 @@ def main():
     QtCore.QCoreApplication.setOrganizationName("UoP")
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # the structure editor (Qt WebEngine) and the 3D view (OpenGL) share GPU contexts
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts, True)
+    try:                                       # load WebEngine before the app object, as Qt requires
+        from PySide6 import QtWebEngineWidgets  # noqa: F401
+    except Exception:
+        pass
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     if os.path.exists(resource("icon.png")):

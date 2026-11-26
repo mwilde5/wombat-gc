@@ -11,7 +11,7 @@ from export_dialogs import FILTERS, ImageExportDialog
 pg.setConfigOptions(antialias=True, background="w", foreground="#222222")
 
 APP_NAME = "WombatGC"          # one place to rename the app
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 
 def settings():
@@ -62,6 +62,11 @@ class SendMixin:
         m.addSeparator()
         m.addAction("Open report builder", lambda: self._deliver("report", None))
         m.addAction("Open figure maker", lambda: self._deliver("figure", None))
+        m.addAction("Open structure editor", self._open_structures)
+
+    def _open_structures(self):
+        import structure_editor
+        structure_editor.open_editor()
 
     def send_target_file(self, ext):
         """Called from the image-export code while sending: a temporary file instead of a Save dialog."""

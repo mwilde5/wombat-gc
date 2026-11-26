@@ -718,6 +718,7 @@ class ReportWindow(QtWidgets.QMainWindow):
         im = mb.addMenu("&Insert")
         im.addAction("Heading", lambda: self.insert(Block("heading", "New section")))
         im.addAction("Text", lambda: self.insert(Block("text", html="<p></p>")))
+        im.addAction("Draw structure…", self.open_structure_editor)
         im.addAction("Image from file (structure, photo…)…", self.insert_image_file)
         im.addAction("Image from clipboard", self.insert_clipboard_image).setShortcut("Ctrl+Shift+V")
         im.addAction("Table", lambda: self.insert(Block("table", "", header=["Column 1", "Column 2", "Column 3"],
@@ -1210,6 +1211,11 @@ class ReportWindow(QtWidgets.QMainWindow):
             return
         self.insert(b)
         self.status.showMessage(f"Added {KIND_NAMES[b.kind].lower()} from {src}" if src else "Added", 5000)
+
+    def open_structure_editor(self):
+        import structure_editor
+        structure_editor.open_editor()
+        self.status.showMessage("Draw the structure, then click Add to report in the structure editor", 8000)
 
     def insert_image_file(self):
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(

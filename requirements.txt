@@ -1,6 +1,7 @@
 numpy>=1.22
 matplotlib>=3.6
 PySide6-Essentials>=6.5
+PySide6-Addons>=6.5
 pyqtgraph>=0.14
 rainbow-api>=1.5,<2
 scipy>=1.9

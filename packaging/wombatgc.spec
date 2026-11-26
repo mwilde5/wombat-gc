@@ -13,7 +13,7 @@ app_modules = ["wombat", "common", "gcms_viewer", "gcms_reader", "integration", 
                "export_dialogs", "ms_library", "nist_search", "library_panel", "gcxgc", "gcxgc_view",
                "view_widgets", "view3d", "mesh_export", "colormaps", "nmr", "nmr_view", "spectra",
                "spectrum_view", "csv_import", "lcms", "lcms_view", "compare_view", "compare_spectra",
-               "drag_labels", "report_builder", "figure_maker"]
+               "drag_labels", "report_builder", "figure_maker", "structure_editor"]
 hidden = app_modules + collect_submodules("pyqtgraph", filter=lambda m: ".examples" not in m and ".tests" not in m) \
     + collect_submodules("nmrglue", filter=lambda m: ".tests" not in m) \
     + collect_submodules("rainbow") + collect_submodules("brukeropusreader") + collect_submodules("opentfraw") \
@@ -24,10 +24,15 @@ hidden = app_modules + collect_submodules("pyqtgraph", filter=lambda m: ".exampl
        "matplotlib.backends.backend_ps", "matplotlib.backends.backend_mixed",
        "PIL.PngImagePlugin", "PIL.TiffImagePlugin", "PIL.JpegImagePlugin",
        # reports (Word) and the figure maker
-       "PySide6.QtSvg", "lxml", "lxml.etree"] + collect_submodules("docx")
+       "PySide6.QtSvg", "lxml", "lxml.etree",
+       # structure editor: Ketcher in a Qt WebEngine view
+       "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore", "PySide6.QtWebChannel", "PySide6.QtNetwork",
+       "PySide6.QtPrintSupport", "http.server"] + collect_submodules("docx")
 datas = collect_data_files("pyqtgraph", excludes=["**/examples/**", "**/tests/**"]) \
     + collect_data_files("openpyxl") + [(os.path.join(ROOT, "icon.png"), ".")] \
-    + collect_data_files("docx", include_py_files=True)   # python-docx finds its templates via docx/parts/../
+    + collect_data_files("docx", include_py_files=True) \
+    + [(os.path.join(ROOT, "ketcher_app", "dist"), "ketcher")]   # the built structure editor (npm run build)
+# python-docx finds its templates via docx/parts/../, hence include_py_files above
 
 a = Analysis(
     [os.path.join(ROOT, "wombat.py")],

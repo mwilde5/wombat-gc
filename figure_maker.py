@@ -69,9 +69,16 @@ def _svg_size_pt(data: bytes):
 class PictureItem(QtWidgets.QGraphicsObject):
     """A plot (SVG, vector) or picture (PNG/JPEG) drawn into a resizable box."""
 
-    def __init__(self, data: bytes, fmt: str, w=None, h=None):
+    def __init__(self, data: bytes, fmt: str, w=None, h=None, meta=None):
         super().__init__()
         self.data, self.fmt = data, fmt
+        self.meta = dict(meta or {})          # e.g. {"ket": ...} for structures drawn in the editor
+        self._load(data, fmt, w, h)
+        self.setFlags(GI.ItemIsMovable | GI.ItemIsSelectable | GI.ItemSendsGeometryChanges)
+        self.setAcceptHoverEvents(True)
+        self._resizing = False
+
+    def _load(self, data, fmt, w, h):
         self.svg = None
         self.img = None
         if fmt == "svg":
@@ -85,11 +92,27 @@ class PictureItem(QtWidgets.QGraphicsObject):
                 dpi = 96
             wpt, hpt = self.img.width() / dpi * 72, self.img.height() / dpi * 72
         self.aspect = (wpt / hpt) if hpt else 1.0
+        self.nat_w = wpt * U
         self.w = w if w is not None else wpt * U
         self.h = h if h is not None else hpt * U
-        self.setFlags(GI.ItemIsMovable | GI.ItemIsSelectable | GI.ItemSendsGeometryChanges)
-        self.setAcceptHoverEvents(True)
-        self._resizing = False
+
+    def replace_svg(self, data, ket):
+        """New drawing from the structure editor, kept at the same scale."""
+        k = self.w / self.nat_w if self.nat_w else 1.0
+        self.prepareGeometryChange()
+        self.data, self.fmt = data, "svg"
+        self.meta["ket"] = ket
+        self._load(data, "svg", None, None)
+        self.w, self.h = self.nat_w * k, self.nat_w * k / self.aspect
+        self.update()
+
+    def mouseDoubleClickEvent(self, ev):
+        if self.meta.get("ket"):
+            import structure_editor
+            structure_editor.open_editor(self)
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
 
     def boundingRect(self):
         hs = _handle_size(self)
@@ -152,7 +175,7 @@ class PictureItem(QtWidgets.QGraphicsObject):
 
     def to_dict(self):
         return dict(type="picture", fmt=self.fmt, data=self.data, x=self.x(), y=self.y(), w=self.w, h=self.h,
-                    z=self.zValue())
+                    z=self.zValue(), meta=dict(self.meta))
 
 
 class ArrowItem(QtWidgets.QGraphicsObject):
@@ -587,7 +610,7 @@ class FigureView(QtWidgets.QGraphicsView):
 def item_from_dict(d):
     t = d.get("type")
     if t == "picture":
-        it = PictureItem(d["data"], d["fmt"], d["w"], d["h"])
+        it = PictureItem(d["data"], d["fmt"], d["w"], d["h"], d.get("meta"))
     elif t == "arrow":
         it = ArrowItem(QtCore.QPointF(d["ax"], d["ay"]), QtCore.QPointF(d["bx"], d["by"]), d.get("style", "single"),
                        d.get("width", 1.0), d.get("color", "#000000"))
@@ -691,6 +714,7 @@ class FigureWindow(QtWidgets.QMainWindow):
         em.addAction("Bring to front", lambda: self.restack(1)).setShortcut("Ctrl+]")
         em.addAction("Send to back", lambda: self.restack(-1)).setShortcut("Ctrl+[")
         im = mb.addMenu("&Insert")
+        im.addAction("Draw structure…", self.open_structure_editor).setShortcut("Ctrl+K")
         im.addAction("Picture / structure from file…", self.insert_file_dialog).setShortcut("Ctrl+I")
         im.addAction("Label (text)", lambda: self.insert_text()).setShortcut("Ctrl+T")
         im.addAction("Caption", self.insert_caption)
@@ -710,6 +734,8 @@ class FigureWindow(QtWidgets.QMainWindow):
         tb.addAction("Picture…", self.insert_file_dialog).setToolTip(
             "Insert a structure or picture (PNG, JPEG, SVG). Plots come from the data windows: "
             "Report ▸ Send … to the figure maker.")
+        tb.addAction("Draw structure…", self.open_structure_editor).setToolTip(
+            "Draw a structure or reaction scheme (e.g. keto ⇌ enol) in the structure editor")
         tb.addAction("Paste", self.paste).setToolTip("Paste a picture (e.g. a structure copied from a drawing "
                                                      "program) or text")
         tb.addAction("Label", lambda: self.insert_text()).setToolTip("Add a text label; double-click to edit it")
@@ -941,14 +967,24 @@ class FigureWindow(QtWidgets.QMainWindow):
         it.setSelected(True)
         self.scene.edited()
 
-    def add_picture(self, data, fmt, pos=None, max_w_mm=None):
-        it = PictureItem(data, fmt)
+    def add_structure(self, svg, ket):
+        """A drawing from the structure editor; double-click it later to edit it again."""
+        it = self.add_picture(svg, "svg", max_w_mm=self.scene.w_mm * 0.6, meta={"ket": ket})
+        self.status.showMessage("Structure added – drag to place it; double-click it to edit the structure", 6000)
+        return it
+
+    def add_picture(self, data, fmt, pos=None, max_w_mm=None, meta=None):
+        it = PictureItem(data, fmt, meta=meta)
         pw = self.scene.page_rect().width()
         limit = (max_w_mm * MM) if max_w_mm else pw
         if it.w > limit:
             it.set_size(limit)
         self._place(it, pos)
         return it
+
+    def open_structure_editor(self):
+        import structure_editor
+        structure_editor.open_editor()
 
     def insert_file(self, path, pos=None):
         ext = os.path.splitext(path)[1].lower()
@@ -1500,7 +1536,9 @@ class FigureWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Figure maker", """
 <b>Plots</b>: in a data window choose <i>Report ▸ Send … to the figure maker</i>. Chromatograms and spectra
 arrive exactly as you set them up (zoom, labels you moved or added) as vector graphics.<br><br>
-<b>Structures and pictures</b>: <i>Picture…</i> inserts PNG, JPEG or SVG files; <i>Paste</i> (Ctrl+V)
+<b>Structures</b>: <i>Draw structure…</i> opens the structure editor (structures and reaction schemes);
+its <i>Insert into figure maker</i> places the drawing here. Double-click a drawn structure to edit it again.<br><br>
+<b>Pictures</b>: <i>Picture…</i> inserts PNG, JPEG or SVG files; <i>Paste</i> (Ctrl+V)
 inserts a structure copied from a drawing program. You can also drag files onto the page.<br><br>
 <b>Labels and captions</b>: double-click text to edit it. Select characters and use x² / x₂ (or
 Ctrl+Shift+= / Ctrl+=) for super- and subscripts, e.g. CDCl₃ or cm⁻¹.<br><br>
