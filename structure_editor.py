@@ -39,11 +39,16 @@ def ketcher_dir():
     return None
 
 
+_webengine_error = ""
+
+
 def webengine_available():
+    global _webengine_error
     try:
         from PySide6 import QtWebEngineWidgets  # noqa: F401
         return True
-    except Exception:
+    except Exception as e:
+        _webengine_error = f"{type(e).__name__}: {e}"
         return False
 
 
@@ -234,7 +239,7 @@ class StructureWindow(QtWidgets.QMainWindow):
         if not webengine_available():
             msg.setText("The structure editor needs the Qt WebEngine component.\n\n"
                         "Installed copies of the app include it. When running from the source code, "
-                        "install it with:  pip install PySide6-Addons")
+                        "install it with:  pip install PySide6-WebEngine")
             return
         if url is None:
             msg.setText("The structure editor isn't built in this copy.\n\nInstalled copies include it. "
@@ -273,7 +278,7 @@ class StructureWindow(QtWidgets.QMainWindow):
         self.poll.timeout.connect(self._refresh_properties)
 
     def diagnostics(self):
-        return "\n".join(getattr(self, "log", ["no web view"]))
+        return "\n".join(getattr(self, "log", [f"no web view ({_webengine_error or ketcher_dir()})"]))
 
     def _check_ready(self):
         def got(v):
