@@ -487,3 +487,46 @@ def xy_figure(path, traces, *, xlim=None, title="", xlabel="x", ylabel="y", reve
     _style(ax, font)
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
+
+
+def spectra_stack_figure(path, panels, *, ref_name="", title="", width_mm=120, height_mm=None, dpi=600, font=8,
+                         n_labels=6, **_):
+    """Mass spectra stacked one per sample. panels: [(title, colour, mz, ab, decimals, ref_or_None)]."""
+    n = len(panels)
+    height_mm = height_mm or max(45, 38 * n)
+    fig = _fig(width_mm, height_mm)
+    axes = np.atleast_1d(fig.subplots(n, 1, sharex=True, squeeze=False)).ravel()
+    lo = min(float(np.min(p[2])) for p in panels)
+    hi = max(float(np.max(p[2])) for p in panels)
+    x0, x1 = max(0.0, np.floor(lo / 10) * 10 - 5), np.ceil(hi / 10) * 10 + 5
+    for ax, (ttl, col, mz, ab, dec, ref) in zip(axes, panels):
+        ax.vlines(mz, 0, ab, color=col, lw=0.8)
+        top = 100.0
+        lowest = 0.0
+        if ref is not None:
+            ax.vlines(ref[0], 0, -np.asarray(ref[1]), color="#888888", lw=0.8)
+            ax.axhline(0, color="#999999", lw=0.4)
+            lowest = -105.0
+            ax.text(0.995, 0.04, f"reference: {ref_name}", transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=font - 2, color="#777777")
+        order = np.argsort(ab)[::-1]
+        used = []
+        for i in order:
+            if len(used) >= n_labels or ab[i] < 3:
+                break
+            if any(abs(mz[i] - u) < (x1 - x0) * 0.035 for u in used):
+                continue
+            used.append(mz[i])
+            ax.annotate(f"{mz[i]:.{dec}f}", (mz[i], ab[i]), xytext=(0, 1.5), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=font - 2)
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(lowest, top * 1.18)
+        ax.set_title(ttl if len(ttl) <= 80 else ttl[:78] + "…", loc="left", fontsize=font - 1, color=col,
+                     fontweight="bold", pad=2)
+        _style(ax, font)
+    axes[-1].set_xlabel("m/z", fontsize=font)
+    fig.supylabel("Relative abundance (%)", fontsize=font)
+    if title:
+        fig.suptitle(title, fontsize=font)
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)

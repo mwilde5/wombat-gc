@@ -1,7 +1,8 @@
 """
-Compare up to 5 chromatograms (GC-MS, GC-FID, netCDF): stacked or overlaid, linked zoom,
-peaks matched across samples, click a peak to highlight it in every sample, and a
-peak × sample table.
+Compare up to 5 chromatograms (GC-MS, GC-FID, netCDF, LC-MS): stacked or overlaid, linked zoom,
+peaks matched across samples, click a peak to highlight it in every sample, a peak × sample
+table, and a mass spectrum beside each sample (same time / same peak / each sample separately),
+with match scores, mirror plots, background subtraction and library search.
 """
 from __future__ import annotations
 
@@ -17,6 +18,9 @@ import hashlib
 
 import gcms_reader as gr
 import gcxgc as gx
+import lcms
+import ms_library as ml
+from compare_spectra import SpecPanel, header as spec_header, match_arrays
 import integration as integ
 import plots_export as px
 import tables
@@ -53,6 +57,7 @@ class Sample:
     noise: float = 1.0
     fold: object = None          # gcxgc.Fold for modulated (GCxGC) runs
     M: np.ndarray | None = None  # folded matrix of y
+    lc: object = None            # lcms.LCData for LC-MS files (all polarities)
 
     @property
     def t(self):
@@ -65,6 +70,7 @@ class Group2D:
     blobs: dict = field(default_factory=dict)    # sample index -> gx.Blob or None
     note: str = ""
     ms_match: dict = field(default_factory=dict)
+    lib: dict = field(default_factory=dict)
 
     def found(self):
         return [k for k, b in self.blobs.items() if b is not None]
@@ -86,6 +92,7 @@ class Group:
     peaks: dict = field(default_factory=dict)   # sample index -> integ.Peak or None (not detected)
     note: str = ""
     ms_match: dict = field(default_factory=dict)  # sample index -> match (0-999) vs reference spectrum
+    lib: dict = field(default_factory=dict)       # sample index -> top library Hit
 
     def found(self):
         return [k for k, p in self.peaks.items() if p is not None]
@@ -237,10 +244,11 @@ class CompareWindow(ToolWindow):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
         fm.addAction("Add sample (.D folder)…", self.add_folder_dialog).setShortcut("Ctrl+O")
-        fm.addAction("Add sample file (.cdf / DATA.MS / .ch)…", self.add_file_dialog).setShortcut("Ctrl+Shift+O")
+        fm.addAction("Add sample file (.cdf / .ch / LC-MS .raw, .mzML)…", self.add_file_dialog).setShortcut("Ctrl+Shift+O")
         fm.addSeparator()
         fm.addAction("Export comparison table (Excel/CSV)…", self.export_table).setShortcut("Ctrl+T")
         fm.addAction("Export image…", self.export_image).setShortcut("Ctrl+E")
+        fm.addAction("Export spectra (image / table)…", self.export_spectra)
         self.add_common_menus(fm)
         am = mb.addMenu("&Peaks")
         am.addAction("Find peaks automatically", self.auto_peaks).setShortcut("Ctrl+R")
@@ -250,6 +258,12 @@ class CompareWindow(ToolWindow):
         am.addSeparator()
         am.addAction("Delete selected peaks", self.delete_selected).setShortcut(QtGui.QKeySequence.Delete)
         am.addAction("Clear all peaks", self.clear_groups)
+        lm = mb.addMenu("&Library")
+        lm.addAction("Show top library hit on each spectrum", lambda: self.lib_chk.toggle())
+        lm.addAction("Search all samples at the current point…", self.search_all_samples).setShortcut("F5")
+        lm.addAction("Identify every peak in the table", self.identify_peaks)
+        lm.addSeparator()
+        lm.addAction("Libraries…", lambda: self.lib.open_settings())
         hm = mb.addMenu("&Help")
         hm.addAction("How to compare samples", self.show_help).setShortcut("F1")
 
@@ -324,6 +338,78 @@ class CompareWindow(ToolWindow):
         for k, txt in integ.BASELINES.items():
             self.base_combo.addItem(txt, k)
         tb2.addWidget(self.base_combo)
+        self.lc_sep = tb2.addSeparator()
+        self.lc_pol_lab = tb2.addWidget(QtWidgets.QLabel(" LC-MS "))
+        self.lc_pol = QtWidgets.QComboBox()
+        self.lc_pol.addItem("Positive mode", "+")
+        self.lc_pol.addItem("Negative mode", "-")
+        self.lc_pol.setCurrentIndex(0 if self.settings.value("cmp/lcpol", "+") == "+" else 1)
+        self.lc_pol.currentIndexChanged.connect(self._lc_polarity_changed)
+        self.lc_pol_act = tb2.addWidget(self.lc_pol)
+        self.ppm = QtWidgets.QDoubleSpinBox()
+        self.ppm.setRange(0.1, 1000)
+        self.ppm.setDecimals(1)
+        self.ppm.setValue(float(self.settings.value("lc/ppm", 5)))
+        self.ppm.setSuffix(" ppm")
+        self.ppm.setToolTip("Extracted-ion window for LC-MS samples")
+        self.ppm.valueChanged.connect(lambda v: (self.settings.setValue("lc/ppm", v), self._trace_changed()))
+        self.ppm_act = tb2.addWidget(self.ppm)
+        for a in (self.lc_sep, self.lc_pol_lab, self.lc_pol_act, self.ppm_act):
+            a.setVisible(False)
+
+        tb3 = QtWidgets.QToolBar("Spectra")
+        tb3.setMovable(False)
+        self.addToolBarBreak()
+        self.addToolBar(tb3)
+        tb3.addWidget(QtWidgets.QLabel(" <b>Spectra</b> at "))
+        self.spec_mode = QtWidgets.QComboBox()
+        self.spec_mode.addItem("Same time / scan in every sample", "time")
+        self.spec_mode.addItem("Same peak (each sample's own maximum)", "peak")
+        self.spec_mode.addItem("Each sample separately", "independent")
+        self.spec_mode.setToolTip("What a click in a chromatogram does to the spectra:\n"
+                                  "• Same time – every sample shows its spectrum at that retention time (after alignment)\n"
+                                  "• Same peak – every sample shows the top of the same peak, even if it elutes a little earlier or later\n"
+                                  "• Each sample separately – only the sample you click changes")
+        i = self.spec_mode.findData(self.settings.value("cmp/specmode", "time"))
+        self.spec_mode.setCurrentIndex(max(0, i))
+        self.spec_mode.currentIndexChanged.connect(
+            lambda *_: self.settings.setValue("cmp/specmode", self.spec_mode.currentData()))
+        tb3.addWidget(self.spec_mode)
+        tb3.addWidget(QtWidgets.QLabel("  Background "))
+        self.bkg_mode = QtWidgets.QComboBox()
+        self.bkg_mode.addItem("None", "none")
+        self.bkg_mode.addItem("Auto (just before each peak)", "auto")
+        self.bkg_mode.addItem("At a chosen time (Shift+click)", "chosen")
+        self.bkg_mode.setToolTip("Background subtraction applied to every sample's spectrum")
+        self.bkg_mode.currentIndexChanged.connect(lambda *_: self._update_spectra())
+        tb3.addWidget(self.bkg_mode)
+        tb3.addWidget(QtWidgets.QLabel("  Compare with "))
+        self.ref_combo = QtWidgets.QComboBox()
+        self.ref_combo.setToolTip("Match scores (0–999) are against this sample's spectrum")
+        self.ref_combo.currentIndexChanged.connect(lambda *_: self._update_spectra())
+        tb3.addWidget(self.ref_combo)
+        self.mirror_chk = QtWidgets.QCheckBox("Mirror")
+        self.mirror_chk.setToolTip("Draw the reference sample's spectrum upside-down under each spectrum")
+        self.mirror_chk.toggled.connect(lambda *_: self._update_spectra())
+        tb3.addWidget(self.mirror_chk)
+        self.lib_chk = QtWidgets.QCheckBox("Library hit")
+        self.lib_chk.setToolTip("Search each spectrum against your libraries and show the best match")
+        self.lib_chk.toggled.connect(self._lib_toggled)
+        tb3.addWidget(self.lib_chk)
+        tb3.addAction("Search all…", self.search_all_samples)
+        tb3.addAction("Identify peaks", self.identify_peaks)
+        tb3.addAction("Libraries…", lambda: self.lib.open_settings())
+        tb3.addSeparator()
+        tb3.addAction("Export spectra…", self.export_spectra)
+        self.spec_idx = {}         # sample -> scan index shown
+        self.spec_note = {}        # sample -> note ("not detected" …)
+        self.spec_group = {}       # sample -> integ.Peak used for the auto background
+        self.marks = {}            # sample -> aligned time of its marker
+        self.bkg_t = None
+        self.cur_specs = {}
+        from library_panel import LibraryPanel
+        self.lib = LibraryPanel(self.settings, lambda: None, lambda *a: None, self.status, self)
+        self.lib.hide()
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         # left: sample list
@@ -351,7 +437,18 @@ class CompareWindow(ToolWindow):
         self.plot_layout = QtWidgets.QVBoxLayout(self.plot_host)
         self.plot_layout.setContentsMargins(0, 0, 0, 0)
         self.plot_layout.setSpacing(0)
-        right.addWidget(self.plot_host)
+        self.spec_host = QtWidgets.QWidget()
+        self.spec_layout = QtWidgets.QVBoxLayout(self.spec_host)
+        self.spec_layout.setContentsMargins(0, 0, 0, 0)
+        self.spec_layout.setSpacing(0)
+        self.spec_panels = []
+        self.plots_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.plots_split.addWidget(self.plot_host)
+        self.plots_split.addWidget(self.spec_host)
+        self.plots_split.setStretchFactor(0, 3)
+        self.plots_split.setStretchFactor(1, 1)
+        self.plots_split.setSizes([800, 330])
+        right.addWidget(self.plots_split)
 
         bottom = QtWidgets.QWidget()
         bv = QtWidgets.QVBoxLayout(bottom)
@@ -437,7 +534,11 @@ class CompareWindow(ToolWindow):
                     for d in ds[:MAX_SAMPLES - len(self.samples)]:
                         self.add_path(d)
                     return
-            if p.lower().endswith(".ch") and os.path.isfile(p):
+            lc = None
+            if p.lower().endswith((".raw", ".mzml", ".mzxml")):
+                lc = lcms.read_any(p)
+                run = self._lc_run(lc)
+            elif p.lower().endswith(".ch") and os.path.isfile(p):
                 run = gr.read_signal(p)
             else:
                 run = gr.read_d(p)
@@ -448,7 +549,7 @@ class CompareWindow(ToolWindow):
         QtWidgets.QApplication.restoreOverrideCursor()
         used = {s.colour for s in self.samples}
         colour = next(c for c in COLOURS if c not in used)
-        s = Sample(path=p, run=run, name=run.name, colour=colour)
+        s = Sample(path=p, run=run, name=run.name, colour=colour, lc=lc)
         self.samples.append(s)
         self._set_fold(s)
         self._compute_trace(len(self.samples) - 1)
@@ -463,15 +564,45 @@ class CompareWindow(ToolWindow):
         self._fill_samples()
         self._rebuild_plots()
         self._fill_table()
+        self._show_lc_controls()
         if len(self.samples) == 1:
             self.reset_zoom()
         self.status.showMessage(f"Added {run.name} ({run.source})", 5000)
+
+    # ------------------------------------------------------------------ LC-MS
+    def _lc_run(self, lc):
+        pol = self.lc_pol.currentData()
+        keys = [k for k, *_ in lc.segments()]
+        key = (pol, 1) if (pol, 1) in keys else next((k for k in keys if k[1] == 1), keys[0])
+        if key[0] != pol:
+            self.status.showMessage(f"{lc.name} has no {'positive' if pol == '+' else 'negative'}-mode scans – "
+                                    f"showing {'positive' if key[0] == '+' else 'negative'} mode", 8000)
+        return lcms.make_run(lc, key)
+
+    def _show_lc_controls(self):
+        any_lc = any(s.lc is not None for s in self.samples)
+        for a in (self.lc_sep, self.lc_pol_lab, self.lc_pol_act, self.ppm_act):
+            a.setVisible(any_lc)
+
+    def _lc_polarity_changed(self, *_):
+        self.settings.setValue("cmp/lcpol", self.lc_pol.currentData())
+        changed = False
+        for k, s in enumerate(self.samples):
+            if s.lc is not None:
+                s.run = self._lc_run(s.lc)
+                self._compute_trace(k)
+                changed = True
+        if changed:
+            self.spec_idx, self.marks = {}, {}
+            self._regroup()
+            self._update_spectra()
 
     def remove_selected_samples(self):
         rows = sorted({i.row() for i in self.stable.selectedIndexes()}, reverse=True)
         if not rows:
             self.status.showMessage("Select a sample in the list first", 3000)
             return
+        self.spec_idx, self.marks, self.spec_note = {}, {}, {}
         for r in rows:
             del self.samples[r]
             for g in self.groups:
@@ -482,6 +613,7 @@ class CompareWindow(ToolWindow):
         self._fill_samples()
         self._rebuild_plots()
         self._fill_table()
+        self._show_lc_controls()
 
     def _fill_samples(self):
         self._updating = True
@@ -552,7 +684,8 @@ class CompareWindow(ToolWindow):
     def _compute_trace(self, k):
         s = self.samples[k]
         if self.trace_combo.currentIndex() == 1 and s.run.has_spectra and self._eic_masses():
-            s.y = np.sum([s.run.eic(m, 0.5) for m in self._eic_masses()], axis=0).astype(float)
+            tol = self.ppm.value() if isinstance(s.run, lcms.HRRun) else 0.5
+            s.y = np.sum([s.run.eic(m, tol) for m in self._eic_masses()], axis=0).astype(float)
         else:
             s.y = np.asarray(s.run.tic, float)
         s.noise = estimate_noise(s.y)
@@ -616,6 +749,7 @@ class CompareWindow(ToolWindow):
     def _rebuild_plots(self):
         for p in self.plots:
             self.plot_layout.removeWidget(p.pw)
+            p.pw.setParent(None)
             p.pw.deleteLater()
         self.plots = []
         for pnl in self.panels2d:
@@ -626,6 +760,7 @@ class CompareWindow(ToolWindow):
             self.plot_layout.removeWidget(self.grid2d_host)
             self.grid2d_host.deleteLater()
             self.grid2d_host = None
+        self._rebuild_spec_panels()
         if self.is2d():
             self._build_2d()
             self._fill_table()
@@ -701,9 +836,8 @@ class CompareWindow(ToolWindow):
             else:
                 cp.label.setHtml(f"<span style='color:#555'>&nbsp;{self.trace_label()}</span>")
             self._draw_groups(cp)
-            cp.marker.setVisible(self.marker_t is not None)
-            if self.marker_t is not None:
-                cp.marker.setValue(self.marker_t)
+            self._draw_marks(cp)
+            cp.marker.setVisible(False)
             cp.vb.fit_y()
             cp._place_label()
 
@@ -855,9 +989,8 @@ class CompareWindow(ToolWindow):
             vb.setRange(xRange=(xa, xb), yRange=(ya, yb), padding=0)
 
     def _click2d(self, k, x, y):
+        self._spectra_from_click2d(k, x, y)
         if self.mode == "inspect" or not self.groups2d:
-            for p in self.panels2d:
-                p.show_point(x, y)
             msg = []
             for s in self.samples:
                 i = s.fold.scan_at(x, y)
@@ -874,8 +1007,6 @@ class CompareWindow(ToolWindow):
         if hit is None:
             if not ctrl:
                 self.selected = set()
-            for p in self.panels2d:
-                p.show_point(x, y)
         elif ctrl:
             self.selected ^= {hit}
         else:
@@ -920,6 +1051,412 @@ class CompareWindow(ToolWindow):
                 pnl.pw.addItem(t, ignoreBounds=True)
                 pnl._cmp_items += [r, t]
 
+    # ------------------------------------------------------------------ spectra beside the chromatograms
+    def _rebuild_spec_panels(self):
+        for p in self.spec_panels:
+            self.spec_layout.removeWidget(p)
+            p.setParent(None)
+            p.deleteLater()
+        self.spec_panels = []
+        for k, s in enumerate(self.samples):
+            p = SpecPanel(k, s.colour)
+            self.spec_layout.addWidget(p, 1)
+            self.spec_panels.append(p)
+        self.spec_host.setVisible(any(s.run.has_spectra for s in self.samples))
+        self.ref_combo.blockSignals(True)
+        cur = self.ref_combo.currentIndex()
+        self.ref_combo.clear()
+        for s in self.samples:
+            self.ref_combo.addItem(s.name)
+        self.ref_combo.setCurrentIndex(min(max(cur, 0), len(self.samples) - 1))
+        self.ref_combo.blockSignals(False)
+        self._update_spectra()
+
+    def _draw_marks(self, cp):
+        overlay = len(cp.ids) > 1
+        for k in cp.ids:
+            t = self.marks.get(k)
+            if t is None or not self.samples[k].visible:
+                continue
+            col = QtGui.QColor(self.samples[k].colour) if overlay else QtGui.QColor(90, 90, 90)
+            ln = pg.InfiniteLine(t, angle=90, pen=pg.mkPen(col, width=1.2, style=QtCore.Qt.DashLine))
+            cp.vb.addItem(ln, ignoreBounds=True)
+            cp.items.append(ln)
+        if self.bkg_t is not None and self.bkg_mode.currentData() == "chosen":
+            ln = pg.InfiniteLine(self.bkg_t, angle=90, pen=pg.mkPen((150, 150, 150), width=1, style=QtCore.Qt.DotLine),
+                                 label="bkg", labelOpts={"position": 0.9, "color": (130, 130, 130)})
+            cp.vb.addItem(ln, ignoreBounds=True)
+            cp.items.append(ln)
+
+    def _clicked_sample(self, cp, x, y):
+        if len(cp.ids) == 1:
+            return cp.ids[0]
+        best, kbest = None, cp.ids[0]
+        for k in cp.ids:
+            s = self.samples[k]
+            if not s.visible:
+                continue
+            i = int(np.argmin(np.abs(s.t - x)))
+            d = abs(float(self.display_y(k)[i]) - y)
+            if best is None or d < best:
+                best, kbest = d, k
+        return kbest
+
+    def _apex_near(self, k, t_aligned, half_width):
+        """Index of the highest point of sample k within ±half_width min of t_aligned, or None
+        if nothing there stands clearly above the noise."""
+        s = self.samples[k]
+        m = np.nonzero(np.abs(s.t - t_aligned) <= half_width)[0]
+        if m.size == 0:
+            return None
+        i = int(m[np.argmax(s.y[m])])
+        if s.y[i] - float(s.y[m].min()) < 10 * s.noise:
+            return None
+        return i
+
+    def _spectra_from_click(self, cp, x, y):
+        if not self.samples:
+            return
+        mode = self.spec_mode.currentData()
+        k0 = self._clicked_sample(cp, x, y)
+        self.spec_group = {}
+        if mode == "time":
+            for k, s in enumerate(self.samples):
+                self.spec_idx[k] = int(np.argmin(np.abs(s.t - x)))
+                self.spec_note[k] = ""
+                self.marks[k] = x
+        elif mode == "independent":
+            s = self.samples[k0]
+            self.spec_idx[k0] = int(np.argmin(np.abs(s.t - x)))
+            self.spec_note[k0] = ""
+            self.marks[k0] = float(s.t[self.spec_idx[k0]])
+        else:
+            # same peak: a matched peak in the table, otherwise the nearest maximum
+            g = None
+            s0 = self.samples[k0]
+            for gg in self.groups:
+                p = gg.peaks.get(k0)
+                if p is not None and p.t_start + s0.shift <= x <= p.t_end + s0.shift:
+                    g = gg
+                    break
+            if g is not None:
+                for k, s in enumerate(self.samples):
+                    p = g.peaks.get(k)
+                    if p is None:
+                        self.spec_idx[k] = None
+                        self.spec_note[k] = "not detected"
+                        self.marks.pop(k, None)
+                        continue
+                    i = p.i0 + int(np.argmax(s.y[p.i0:p.i1 + 1]))
+                    self.spec_idx[k], self.spec_note[k] = i, ""
+                    self.spec_group[k] = p
+                    self.marks[k] = float(s.t[i])
+            else:
+                dt = float(np.median(np.diff(s0.run.times))) if s0.run.n_scans > 1 else 0.01
+                i0 = self._apex_near(k0, x, max(3 * dt, 0.01))
+                if i0 is None:
+                    i0 = int(np.argmin(np.abs(s0.t - x)))
+                t0 = float(s0.t[i0])
+                for k, s in enumerate(self.samples):
+                    i = i0 if k == k0 else self._apex_near(k, t0, self.tol.value())
+                    if i is None:
+                        self.spec_idx[k] = None
+                        self.spec_note[k] = "no peak here"
+                        self.marks.pop(k, None)
+                    else:
+                        self.spec_idx[k], self.spec_note[k] = i, ""
+                        self.marks[k] = float(s.t[i])
+        self._redraw()
+        self._update_spectra()
+
+    def _spectra_from_click2d(self, k0, x, y):
+        mode = self.spec_mode.currentData()
+        self.spec_group = {}
+        if mode == "time":
+            for k, s in enumerate(self.samples):
+                self.spec_idx[k], self.spec_note[k] = s.fold.scan_at(x, y), ""
+        elif mode == "independent":
+            s = self.samples[k0]
+            self.spec_idx[k0], self.spec_note[k0] = s.fold.scan_at(x, y), ""
+        else:
+            g = next((gg for gg in self.groups2d if gg.box[0] <= x <= gg.box[1] and gg.box[2] <= y <= gg.box[3]), None)
+            for k, s in enumerate(self.samples):
+                if g is not None:
+                    b = g.blobs.get(k)
+                    self.spec_idx[k] = b.apex_scan if b is not None else None
+                    self.spec_note[k] = "" if b is not None else "not detected"
+                    continue
+                # nearest local maximum in a small box around the click
+                P = s.fold.P / 60.0
+                j0, j1, r0, r1 = s.fold.box_pixels(x - 1.5 * P, x + 1.5 * P, y - 0.15, y + 0.15)
+                sub = s.M[j0:j1 + 1, r0:r1 + 1]
+                if sub.size == 0:
+                    self.spec_idx[k] = None
+                    continue
+                jj, rr = np.unravel_index(int(np.argmax(sub)), sub.shape)
+                scan = int(s.fold.scan_map[j0 + jj, r0 + rr])
+                self.spec_idx[k] = scan if scan >= 0 else s.fold.scan_at(x, y)
+                self.spec_note[k] = ""
+        for k, pnl in enumerate(self.panels2d):
+            i = self.spec_idx.get(k)
+            if i is not None:
+                pnl.show_point(*self.samples[k].fold.coords_of_scan(i))
+        self._update_spectra()
+
+    def _bkg_scan(self, k, i):
+        s = self.samples[k]
+        mode = self.bkg_mode.currentData()
+        if mode == "chosen" and self.bkg_t is not None:
+            return int(np.argmin(np.abs(s.t - self.bkg_t)))
+        if mode != "auto":
+            return None
+        p = self.spec_group.get(k)
+        if p is not None:
+            return max(0, p.i0)
+        # walk down the left side of the peak to its foot
+        y = s.y
+        j = i
+        lim = max(0, i - 400)
+        while j > lim and y[j - 1] <= y[j]:
+            j -= 1
+        return j if j < i else None
+
+    def _spectrum_for(self, k, i):
+        s = self.samples[k]
+        if i is None or not s.run.has_spectra:
+            return None
+        spec = s.run.spectrum_range(i, i) if hasattr(s.run, "spectrum_range") else s.run.spectrum(i)
+        b = self._bkg_scan(k, i)
+        if b is not None and b != i:
+            bk = s.run.spectrum_range(max(0, b - 1), min(s.run.n_scans - 1, b + 1))
+            spec = s.run.subtract(spec, bk)
+        mz, ab = np.asarray(spec[0], float), np.asarray(spec[1], float)
+        if ab.size == 0 or ab.max() <= 0:
+            return None
+        keep = ab > ab.max() * 0.001
+        return mz[keep], 100.0 * ab[keep] / ab.max()
+
+    def _update_spectra(self):
+        if not self.spec_panels:
+            return
+        specs = {k: self._spectrum_for(k, self.spec_idx.get(k)) for k in range(len(self.samples))}
+        self.cur_specs = specs
+        ref_k = self.ref_combo.currentIndex()
+        ref = specs.get(ref_k)
+        allmz = [sp[0] for sp in specs.values() if sp is not None]
+        xr = None
+        if allmz:
+            lo = min(float(m.min()) for m in allmz)
+            hi = max(float(m.max()) for m in allmz)
+            xr = (max(0.0, np.floor(lo / 10) * 10 - 5), np.ceil(hi / 10) * 10 + 5)
+        libs = self._libs(quiet=True) if self.lib_chk.isChecked() else None
+        for k, (s, pnl) in enumerate(zip(self.samples, self.spec_panels)):
+            dec = int(s.run.metadata.get("mz_label_decimals", 0) or 0)
+            if not s.run.has_spectra:
+                pnl.set_spectrum(None, spec_header(s.name, s.colour, s.run.trace_name),
+                                 message=f"{s.run.trace_name}: no mass spectra")
+                continue
+            i = self.spec_idx.get(k)
+            sp = specs.get(k)
+            if i is None:
+                pnl.set_spectrum(None, spec_header(s.name, s.colour, "", note=self.spec_note.get(k, "")),
+                                 message=self.spec_note.get(k) or "click a chromatogram")
+                continue
+            where = f"{s.run.times[i]:.3f} min · scan {i + 1}"
+            note = []
+            if self.bkg_mode.currentData() != "none" and self._bkg_scan(k, i) is not None:
+                note.append("bkg sub.")
+            match = None
+            if k != ref_k and ref is not None and sp is not None:
+                match = match_arrays(sp, ref, 0 if dec == 0 else 2)
+            hit = None
+            if libs and sp is not None:
+                hits = ml.search_all(libs, sp[0], sp[1], top=1,
+                                     ei_only=self.settings.value("lib/ei_only", "true") == "true")
+                hit = hits[0] if hits else None
+            pnl.set_spectrum(sp, spec_header(s.name, s.colour, where, match, hit, " ".join(note)),
+                             ref=ref if (self.mirror_chk.isChecked() and k != ref_k) else None,
+                             decimals=dec, xrange=xr)
+
+    # ------------------------------------------------------------------ library search
+    def _libs(self, quiet=False):
+        enabled = [e["path"] for e in self.lib.lib_entries if e["enabled"]]
+        if not enabled:
+            if not quiet:
+                QtWidgets.QMessageBox.information(
+                    self, APP_NAME, "No libraries set up yet. Use Library ▸ Libraries… to download MassBank "
+                                    "or add your own MSP files (the same libraries as the GC-MS window).")
+            return None
+        self.lib._ensure_loaded(enabled)
+        libs = [self.lib.loaded[p] for p in enabled if p in self.lib.loaded]
+        return libs or None
+
+    def _lib_toggled(self, on):
+        if on and self._libs() is None:
+            self.lib_chk.blockSignals(True)
+            self.lib_chk.setChecked(False)
+            self.lib_chk.blockSignals(False)
+            return
+        self._update_spectra()
+
+    def search_all_samples(self):
+        if not any(sp is not None for sp in self.cur_specs.values()):
+            self.status.showMessage("Click a chromatogram first to choose the spectra to search", 5000)
+            return
+        libs = self._libs()
+        if libs is None:
+            return
+        ei = self.settings.value("lib/ei_only", "true") == "true"
+        res = {}
+        for k, sp in self.cur_specs.items():
+            if sp is not None:
+                res[k] = ml.search_all(libs, sp[0], sp[1], top=5, ei_only=ei)
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Library hits for every sample")
+        v = QtWidgets.QVBoxLayout(dlg)
+        tops = {k: h[0].name for k, h in res.items() if h}
+        same = len(set(n.lower() for n in tops.values())) <= 1
+        v.addWidget(QtWidgets.QLabel(("The best hit is the <b>same</b> in every sample." if same and len(tops) > 1 else
+                                      "The best hits <b>differ</b> between samples – check the spectra."
+                                      if len(tops) > 1 else "")))
+        t = QtWidgets.QTableWidget(len(self.samples), 6)
+        t.setHorizontalHeaderLabels(["Sample", "Hit 1", "Hit 2", "Hit 3", "Hit 4", "Hit 5"])
+        t.verticalHeader().hide()
+        t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        rows = []
+        for k, s in enumerate(self.samples):
+            hits = res.get(k, [])
+            row = [s.name] + [f"{h.name} ({h.match})" for h in hits] + [""] * (5 - len(hits))
+            rows.append(row)
+            for c, val in enumerate(row):
+                it = QtWidgets.QTableWidgetItem(val)
+                if c == 0:
+                    it.setForeground(QtGui.QColor(s.colour))
+                t.setItem(k, c, it)
+        t.resizeColumnsToContents()
+        v.addWidget(t)
+        bb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("Copy table")
+        b.clicked.connect(lambda: tables.copy_table(["Sample", "Hit 1", "Hit 2", "Hit 3", "Hit 4", "Hit 5"], rows,
+                                                    "Library hits"))
+        bb.addWidget(b)
+        bb.addStretch(1)
+        c = QtWidgets.QPushButton("Close")
+        c.clicked.connect(dlg.accept)
+        bb.addWidget(c)
+        v.addLayout(bb)
+        dlg.resize(1000, 120 + 32 * len(self.samples))
+        dlg.exec()
+
+    def identify_peaks(self):
+        groups = self.cur()
+        if not groups:
+            self.status.showMessage("No peaks in the table yet", 4000)
+            return
+        libs = self._libs()
+        if libs is None:
+            return
+        ei = self.settings.value("lib/ei_only", "true") == "true"
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for g in groups:
+                g.lib = {}
+                for k in g.found():
+                    s = self.samples[k]
+                    if not s.run.has_spectra:
+                        continue
+                    if isinstance(g, Group2D):
+                        i = g.blobs[k].apex_scan
+                        self.spec_group = {}
+                    else:
+                        p = g.peaks[k]
+                        i = p.i0 + int(np.argmax(s.y[p.i0:p.i1 + 1]))
+                        self.spec_group = {k: p}
+                    sp = self._spectrum_for(k, i)
+                    if sp is not None:
+                        hits = ml.search_all(libs, sp[0], sp[1], top=1, ei_only=ei)
+                        if hits:
+                            g.lib[k] = hits[0]
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.spec_group = {}
+        self._fill_table()
+        n = sum(1 for g in groups if g.lib)
+        self.status.showMessage(f"Identified {n} of {len(groups)} peaks (best hit per sample in the Library ID column)",
+                                6000)
+
+    @staticmethod
+    def lib_text(g):
+        if not g.lib:
+            return ""
+        names = {}
+        for k, h in g.lib.items():
+            names.setdefault(h.name, []).append(h.match)
+        best = max(g.lib.values(), key=lambda h: h.match)
+        txt = f"{best.name} ({best.match})"
+        if len(names) > 1:
+            txt += " – differs between samples"
+        return txt
+
+    def export_spectra(self):
+        specs = [(k, sp) for k, sp in self.cur_specs.items() if sp is not None]
+        if not specs:
+            self.status.showMessage("Click a chromatogram first to choose the spectra", 4000)
+            return
+        m = QtWidgets.QMenu(self)
+        a_img = m.addAction("Image (all spectra stacked)…")
+        a_tab = m.addAction("Table (Excel / CSV)…")
+        act = m.exec(QtGui.QCursor.pos())
+        if act is a_img:
+            self._export_spectra_image(specs)
+        elif act is a_tab:
+            self._export_spectra_table(specs)
+
+    def _spec_title(self, k):
+        s = self.samples[k]
+        i = self.spec_idx.get(k)
+        return f"{s.name} – {s.run.times[i]:.3f} min" if i is not None else s.name
+
+    def _export_spectra_image(self, specs):
+        fn, opts, _ = self.image_target("cmpspec", "", "compared_spectra",
+                                        [("mirror", "Mirror each against the reference sample", self.mirror_chk.isChecked())])
+        if not fn:
+            return
+        ref_k = self.ref_combo.currentIndex()
+        ref = self.cur_specs.get(ref_k)
+        panels = []
+        for k, sp in specs:
+            s = self.samples[k]
+            dec = int(s.run.metadata.get("mz_label_decimals", 0) or 0)
+            match = match_arrays(sp, ref, 0 if dec == 0 else 2) if (ref is not None and k != ref_k) else None
+            title = self._spec_title(k) + (f"  (match {match})" if match is not None else "")
+            panels.append((title, s.colour, sp[0], sp[1], dec,
+                           ref if (opts.get("mirror") and k != ref_k and ref is not None) else None))
+        opts.pop("mirror", None)
+        try:
+            px.spectra_stack_figure(fn, panels, ref_name=self.samples[ref_k].name if self.samples else "", **opts)
+        except Exception as e:
+            self.error(f"Export failed:\n{e}\n{traceback.format_exc(limit=3)}")
+            return
+        self.done(fn)
+
+    def _export_spectra_table(self, specs):
+        dec = max(int(self.samples[k].run.metadata.get("mz_label_decimals", 0) or 0) for k, _ in specs)
+        keys = sorted(set(np.round(np.concatenate([sp[0] for _, sp in specs]), dec)))
+        cols = []
+        for k, sp in specs:
+            d = {}
+            for m, a in zip(np.round(sp[0], dec), sp[1]):
+                d[m] = d.get(m, 0.0) + a
+            cols.append(d)
+        h = ["m/z"] + [self._spec_title(k) for k, _ in specs]
+        rows = [[f"{m:.{dec}f}"] + [f"{c[m]:.2f}" if m in c else "" for c in cols] for m in keys]
+        meta = [("Spectra", "relative intensity (% of the largest peak in each spectrum)"),
+                ("Background", self.bkg_mode.currentText())]
+        fn = tables.export_table(self, self.settings, h, rows, meta, "compared_spectra", sheet="Spectra")
+        if fn:
+            self.done(fn)
+
     # ------------------------------------------------------------------ mouse
     def _set_mode(self, k):
         self.mode = k
@@ -959,9 +1496,15 @@ class CompareWindow(ToolWindow):
     def _click(self, cp, x, y):
         if not self.samples:
             return
-        if self.mode == "inspect":
-            self.marker_t = x
+        shift = QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier
+        if shift and self.bkg_mode.currentData() == "chosen":
+            self.bkg_t = x
             self._redraw()
+            self._update_spectra()
+            self.status.showMessage(f"Background spectra taken at {x:.3f} min in every sample", 5000)
+            return
+        self._spectra_from_click(cp, x, y)
+        if self.mode == "inspect":
             msgs = []
             for k, s in enumerate(self.samples):
                 i = int(np.argmin(np.abs(s.t - x)))
@@ -1215,7 +1758,7 @@ class CompareWindow(ToolWindow):
         h = ["#", "¹tR (min)", "²tR (s)"] if self.is2d() else ["#", "RT (min)"]
         h += ["Compound / note"] + [s.name for s in self.samples] + ["Found in"]
         if self._has_ms():
-            h += ["MS match (min)"]
+            h += ["MS match (min)", "Library ID"]
         return h
 
     def _fill_table(self):
@@ -1236,8 +1779,11 @@ class CompareWindow(ToolWindow):
             row += [f"{len(g.found())}/{n}"]
             if "MS match (min)" in h:
                 vals = [v for v in g.ms_match.values() if v is not None]
-                row += [str(min(vals)) if vals else ""]
+                row += [str(min(vals)) if vals else "", self.lib_text(g)]
             set_row(t, gi, row, editable=(lead,))
+            if g.lib and "Library ID" in h:
+                t.item(gi, len(h) - 1).setToolTip("\n".join(f"{self.samples[k].name}: {hh.name} ({hh.match})"
+                                                            for k, hh in sorted(g.lib.items())))
             for k in range(n):
                 it = t.item(gi, lead + 1 + k)
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -1329,6 +1875,8 @@ class CompareWindow(ToolWindow):
         has_ms = self._has_ms()
         if has_ms and not short:
             h += ["Lowest MS match"]
+        if has_ms and any(g.lib for g in self.cur()):
+            h += ["Library ID"]
         rows = []
         for gi, g in enumerate(self.cur()):
             r = [gi + 1] + ([f"{g.rt1:.3f}", f"{g.rt2:.3f}"] if self.is2d() else [f"{g.rt:.3f}"]) + [g.note]
@@ -1336,6 +1884,8 @@ class CompareWindow(ToolWindow):
             if has_ms and not short:
                 vals = [v for v in g.ms_match.values() if v is not None]
                 r += [min(vals) if vals else ""]
+            if has_ms and any(gg.lib for gg in self.cur()):
+                r += [self.lib_text(g)]
             rows.append(r)
         return h, rows
 
@@ -1430,6 +1980,16 @@ Samples where nothing stands above the noise get <b>n.d.</b> (not detected) and 
 <b>Retention-time shifts</b><br>
 Select a peak present in every sample and press <i>Align on selected</i>, or type a shift for each sample.
 Peaks are matched within the tolerance in the second toolbar.<br><br>
+<b>Spectra</b><br>
+For GC-MS and LC-MS, each sample has its mass spectrum beside it. <i>Spectra at</i> decides what a click does:
+<b>Same time / scan</b> (default) shows every sample at that retention time; <b>Same peak</b> shows each sample at the
+top of the same peak, even if it elutes slightly earlier or later; <b>Each sample separately</b> changes only the
+sample you click. <i>Background</i> subtracts a background spectrum from every sample (automatically just before the
+peak, or at a time you Shift+click). Match scores compare each spectrum with the <i>Compare with</i> sample;
+<i>Mirror</i> draws that sample's spectrum upside-down underneath.<br>
+<i>Library hit</i> shows the best match from your libraries on each spectrum; <i>Search all</i> lists the top five
+for every sample; <i>Identify peaks</i> fills the Library ID column of the table. LC-MS samples have a positive /
+negative mode switch and a ppm window for extracted-ion traces.<br><br>
 <b>GCxGC</b><br>
 When every sample is GCxGC (netCDF with a modulation period), choose View ▸ <i>2D (GCxGC)</i> for side-by-side
 2D plots with linked zoom. Drag a box around a blob to integrate it in every sample; click to put a cross at the

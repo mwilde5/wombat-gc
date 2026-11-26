@@ -10,7 +10,7 @@ A desktop app for analytical data, for teaching and research. The start screen a
 | **FT-IR** | Bruker OPUS (`.0`, `.1` …), JCAMP-DX, CSV |
 | **LC-MS** | Thermo `.raw`, mzML, mzXML |
 | **CSV / text** | any columns of numbers: you choose the columns and the kind of data |
-| **Compare samples** | up to 5 chromatograms (1D or GCxGC 2D) side by side |
+| **Compare samples** | up to 5 chromatograms (GC, GCxGC or LC-MS) side by side, with their mass spectra |
 
 Every technique has publication-quality image export (PNG/TIFF at any dpi, SVG/PDF) and tables that export to Excel or paste straight into Word (see *Exporting tabulated data*).
 
@@ -213,7 +213,7 @@ The data then open in the matching window: chromatograms and GCxGC in the GC win
 
 *Compare samples* on the start screen, or *File ▸ Compare samples* in the GC window.
 
-- Add up to five runs (.D folders, netCDF, FID `.ch`). Choosing a folder that contains several .D folders adds them all.
+- Add up to five runs (.D folders, netCDF, FID `.ch`, Thermo `.raw`, mzML). Choosing a folder that contains several .D folders adds them all.
 - **Stacked** or **Overlaid** view with linked zoom; *Normalise heights* scales each to its largest peak.
 - **2 Integrate:** drag across a peak in any sample. It is integrated in every sample at once, and marked **n.d.** (not detected) where nothing stands above the noise.
 - **Find peaks** does this for every peak above the thresholds in the second toolbar.
@@ -221,6 +221,15 @@ The data then open in the matching window: chromatograms and GCxGC in the GC win
 - **Align on selected** lines up retention times on a peak that is in every sample (or type a shift per sample).
 - The table shows area, area %, height, or the ratio to a reference peak (right-click a row ▸ *Use as reference*, e.g. an internal standard). For GC-MS, *MS match* compares the apex spectra; low values are shaded because the peaks may be different compounds.
 - **2D (GCxGC)** view: side-by-side 2D plots with linked zoom; drag a box around a blob to integrate it in every sample.
+- **Mass spectra beside each sample** (GC-MS, LC-MS, GCxGC-MS). *Spectra at* sets what a click does:
+  - **Same time / scan** (default): every sample shows its spectrum at that retention time (after any alignment).
+  - **Same peak**: every sample shows the top of the same peak, even if it elutes slightly earlier or later; samples without it say so.
+  - **Each sample separately**: only the sample you click changes, for comparing different peaks or scans.
+- **Background** subtraction for every sample at once: automatic (just before each peak) or at a time you Shift+click.
+- **Compare with** picks the reference sample: each spectrum shows its match score (0–999) against it, and *Mirror* draws the reference upside-down underneath.
+- **Library search:** *Library hit* shows the best match on each spectrum; *Search all* lists the top five hits for every sample side by side; *Identify peaks* fills a *Library ID* column in the table (and says when samples disagree). It uses the same libraries as the GC-MS window.
+- **LC-MS samples** (.raw, mzML, mzXML) can be compared too, with a positive / negative mode switch and a ppm window for extracted-ion traces.
+- **Export spectra** saves the spectra stacked as one figure (optionally mirrored) or as a table of m/z against intensity for each sample.
 
 ## Exporting tabulated data
 

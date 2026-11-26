@@ -11,7 +11,7 @@ from export_dialogs import FILTERS, ImageExportDialog
 pg.setConfigOptions(antialias=True, background="w", foreground="#222222")
 
 APP_NAME = "WombatGC"          # one place to rename the app
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 
 def settings():
