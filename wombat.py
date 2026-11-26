@@ -488,7 +488,7 @@ def selftest(ctl, app):
             app.processEvents()
             QtCore.QThread.msleep(20)
         if not w.ready:
-            raise RuntimeError("editor did not start within 120 s")
+            raise RuntimeError("editor did not start within 120 s\n" + w.diagnostics())
         print(f"selftest structure editor start: ok ({t.elapsed() / 1000:.1f} s)", flush=True)
         res = {}
         w.set_structure("CC(=O)CC(C)=O>>CC(O)=CC(C)=O", lambda: res.setdefault("set", True))

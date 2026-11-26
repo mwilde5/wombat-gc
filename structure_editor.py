@@ -242,10 +242,25 @@ class StructureWindow(QtWidgets.QMainWindow):
                         "cd ketcher_app  then  npm ci  then  npm run build")
             return
         from PySide6 import QtWebEngineCore, QtWebEngineWidgets
+
+        class Page(QtWebEngineCore.QWebEnginePage):
+            def __init__(self, log, parent=None):
+                super().__init__(parent)
+                self.log = log
+
+            def javaScriptConsoleMessage(self, level, message, line, source):
+                if len(self.log) < 60:
+                    self.log.append(f"js {level.name if hasattr(level, 'name') else level}: {message} "
+                                    f"({os.path.basename(source or '')}:{line})")
+
+        self.log = [f"url {url}"]
         self.view = QtWebEngineWidgets.QWebEngineView()
-        prof = self.view.page().profile()
-        prof.setHttpCacheType(QtWebEngineCore.QWebEngineProfile.NoCache)
-        self.view.page().javaScriptConsoleMessage = lambda *a: None
+        self.view.setPage(Page(self.log, self.view))
+        page = self.view.page()
+        page.profile().setHttpCacheType(QtWebEngineCore.QWebEngineProfile.NoCache)
+        page.loadFinished.connect(lambda ok: self.log.append(f"page loaded: {ok}"))
+        page.renderProcessTerminated.connect(
+            lambda status, code: self.log.append(f"render process ended: {status} (exit code {code})"))
         self.holder.addWidget(self.view)
         msg.setText("Starting the structure editor…")
         self.view.load(QtCore.QUrl(url))
@@ -256,6 +271,9 @@ class StructureWindow(QtWidgets.QMainWindow):
         self._t0.start()
         self.poll = QtCore.QTimer(self, interval=1200)
         self.poll.timeout.connect(self._refresh_properties)
+
+    def diagnostics(self):
+        return "\n".join(getattr(self, "log", ["no web view"]))
 
     def _check_ready(self):
         def got(v):
