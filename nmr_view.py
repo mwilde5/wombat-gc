@@ -112,6 +112,7 @@ class NMRWindow(ToolWindow):
         am.addAction("Reference to solvent", self.reference_to_solvent)
         am.addAction("Baseline correction", self.baseline_correct)
         hm = mb.addMenu("&Help")
+        self.add_report_menu(before=hm)
         hm.addAction("How to analyse an NMR spectrum", self.show_help).setShortcut("F1")
 
         tb = self.addToolBar("Main")
@@ -1154,9 +1155,21 @@ class NMRWindow(ToolWindow):
         txt = self.report_text()
         self.report.setHtml(self.report_html(txt))
 
+    def report_sources(self):
+        if self.sp is None:
+            return []
+        out = [("the spectrum", "image", self.export_image)]
+        if self.report.toPlainText().strip():
+            out.append(("the report text (experimental data)", "text", self.copy_report))
+        if self.regions:
+            out.append(("the multiplet table", "table", self.copy_multiplets))
+        if self.peaks:
+            out.append(("the peak table", "table", self.copy_peaks))
+        return out
+
     def copy_report(self):
         plain = self.report.toPlainText()
-        tables.copy_text(plain, self.report_html(plain))
+        tables.copy_text(plain, self.report.toHtml())      # keeps super/subscripts and any edits
         self.status.showMessage("Report copied – paste into Word to keep the formatting", 4000)
 
     # ------------------------------------------------------------------ processing

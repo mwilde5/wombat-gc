@@ -265,6 +265,7 @@ class CompareWindow(ToolWindow):
         lm.addSeparator()
         lm.addAction("Libraries…", lambda: self.lib.open_settings())
         hm = mb.addMenu("&Help")
+        self.add_report_menu(before=hm)
         hm.addAction("How to compare samples", self.show_help).setShortcut("F1")
 
         tb = self.addToolBar("Main")
@@ -1910,6 +1911,17 @@ class CompareWindow(ToolWindow):
                                  "sample_comparison_2D" if self.is2d() else "sample_comparison", sheet="Comparison")
         if fn:
             self.done(fn)
+
+    def report_sources(self):
+        if not self.samples:
+            return []
+        out = [("the comparison plot", "image", self.export_image)]
+        specs = [(k, sp) for k, sp in self.cur_specs.items() if sp is not None]
+        if specs:
+            out.append(("the mass spectra (stacked)", "image", lambda: self._export_spectra_image(
+                [(k, sp) for k, sp in self.cur_specs.items() if sp is not None])))
+        out.append(("the comparison table", "table", self.copy_table))
+        return out
 
     def copy_table(self):
         if not self.cur():

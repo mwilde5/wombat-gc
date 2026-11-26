@@ -12,7 +12,7 @@ A desktop app for analytical data, for teaching and research. The start screen a
 | **CSV / text** | any columns of numbers: you choose the columns and the kind of data |
 | **Compare samples** | up to 5 chromatograms (GC, GCxGC or LC-MS) side by side, with their mass spectra |
 
-Every technique has publication-quality image export (PNG/TIFF at any dpi, SVG/PDF) and tables that export to Excel or paste straight into Word (see *Exporting tabulated data*).
+Every technique has publication-quality image export (PNG/TIFF at any dpi, SVG/PDF) and tables that export to Excel or paste straight into Word (see *Exporting tabulated data*). The **figure maker** puts plots, structures, labels and arrows together on one page, and the **report builder** turns figures, tables and report text into a student or client report (PDF or Word). See *Figures and reports*.
 
 ## Installing it (students and staff)
 
@@ -62,6 +62,8 @@ You can:
 | Integrate | In **Integrate** mode (key `2`), drag from the start to the end of a peak. Ctrl+Z undoes the last peak. To delete a peak, select its row and press Delete. Double-click the *Name / note* cell to label a peak. |
 | Zoom | Mouse wheel zooms the time axis (the y-axis rescales itself). Ctrl+wheel zooms intensity. Right-drag draws a zoom box. Middle-drag pans. Right-click steps back out. **Home** returns to the full view. |
 | Export | Use the **CSV…** / **Image…** buttons above each plot, or the **File** menu. The image dialog sets format, dpi, size in mm, font size, and whether to use the current zoom or the full range. |
+| Move peak labels | Drag a peak label away from the trace; a thin line joins it to its peak. **Labels ▸ Auto-arrange labels** spaces out crowded labels for the current zoom, and **Labels** also sets the label text (peak number, retention time, name, or number and name). Image exports keep your layout. |
+| Add or remove m/z labels | Turn on **Edit labels** above the spectrum and click a peak to add or remove its label; drag labels to move them. The arrow beside it sets how many peaks are labelled automatically. Image exports keep your changes. |
 | Copy | **Copy** above the spectrum puts tab-separated m/z/abundance on the clipboard, ready to paste into Excel or NIST MS Search. **Copy** in the Peaks panel does the same for the peak table. |
 
 ### Library search (Library search tab)
@@ -231,6 +233,34 @@ The data then open in the matching window: chromatograms and GCxGC in the GC win
 - **LC-MS samples** (.raw, mzML, mzXML) can be compared too, with a positive / negative mode switch and a ppm window for extracted-ion traces.
 - **Export spectra** saves the spectra stacked as one figure (optionally mirrored) or as a table of m/z against intensity for each sample.
 
+## Figures and reports
+
+Every data window has a **Report** menu.
+
+- **Add … to report** sends the chromatogram, spectrum, peak table, NMR multiplet table or NMR / IR report text to the report builder. Images use the normal image dialog (zoom, labels, size, 600 dpi by default). The title you type there becomes the figure caption.
+- **Send … to the figure maker** places the plot on the figure maker's page as a vector graphic.
+
+### Figure maker
+
+- **Pictures:** *Picture…* inserts structures or pictures (PNG, JPEG, SVG). *Paste* (Ctrl+V) inserts a structure copied from a drawing program. You can also drag a file onto the page.
+- **Labels and captions:** double-click text to edit it. x² / x₂ (or Ctrl+Shift+= / Ctrl+=) make superscripts and subscripts.
+- **Arrows:** → reaction, ↔ resonance, ⇌ equilibrium (e.g. keto–enol tautomerism), ⇒ retrosynthesis, and plain lines. Drag on the page to draw one; drag its ends to point it. Angles snap to 15° unless you hold Shift.
+- **Layout:** drag items to move them; drag a picture's corner square to resize it. Arrow keys nudge the selection. Select several items to align them. The page size has presets for journal columns, A4 and slides, or use *Fit page to contents*.
+- **Output:** export as PNG / TIFF (600 dpi default), SVG or PDF, copy to the clipboard, or *Add to report*. *Save figure* (.wgfig) keeps it editable. Undo and redo with Ctrl+Z / Ctrl+Y.
+
+### Report builder
+
+- **Templates** (*New*):
+  - student laboratory report
+  - compound characterisation
+  - client analysis report, with fields for report number, client, client point of contact, sample ID(s), dates received and reported, and analyst
+  - blank versions of the student and client reports
+- **Template prompts:** grey items are prompts and are left out of the export until you edit them.
+- **Adding content:** new content goes after the selected item. If nothing is selected, it goes at the end of the *Results* section. *Insert* adds headings, text (bold, italic, superscript, subscript and common symbols), editable tables, images and page breaks. Drag items in *Contents* to reorder them.
+- **Export:** PDF or Word (.docx). Figures and tables are numbered automatically. Images keep their full resolution: they are stored losslessly, not as JPEG. The header and footer carry the letterhead (client reports), report number or student name, and page numbers.
+- **Letterhead ▸ Logo… / Organisation name and address…** set the logo and the address block for client reports. These are saved on each computer, not in the report file, so the logo file isn't distributed with the app.
+- **Save** (.wgreport) keeps the whole report, images included, so you can come back to it.
+
 ## Exporting tabulated data
 
 Every table (integrated peaks, GCxGC blobs, NMR multiplets and peaks, IR bands, sample comparisons) has **Export table…**, which saves an Excel workbook (.xlsx), CSV or tab-separated text, and **Copy for report**, which copies a short table. Paste it into Word or PowerPoint and it arrives as a formatted table; paste it into Excel and it fills the cells.
@@ -249,6 +279,9 @@ Every table (integrated peaks, GCxGC blobs, NMR multiplets and peaks, IR bands, 
 | `lcms.py`, `lcms_view.py` | LC-MS readers (Thermo .raw, mzML, mzXML), exact-mass tools, the LC-MS window |
 | `compare_view.py` | the comparison window |
 | `export_dialogs.py` | the image-export dialog |
+| `drag_labels.py` | draggable plot labels and label auto-arrangement |
+| `figure_maker.py` | the figure maker |
+| `report_builder.py` | the report builder (PDF and Word export) |
 | `gcms_reader.py` | file readers. These can be used on their own in scripts, e.g. `run = read_d("x.D"); run.tic; run.spectrum(i); run.eic(176)` |
 | `integration.py` | integration maths |
 | `plots_export.py` | publication-figure export (matplotlib) |
@@ -266,4 +299,4 @@ MassHunter files are read with the open-source [rainbow-api](https://pypi.org/pr
 
 ### Licences of the libraries used
 
-numpy, scipy, nmrglue, PyOpenGL (BSD); matplotlib (PSF-style); pyqtgraph, openpyxl (MIT); PySide6, rainbow-api (LGPL-3.0); opentfraw (Apache-2.0); brukeropusreader (GPL-3.0).
+numpy, scipy, nmrglue, PyOpenGL (BSD); matplotlib (PSF-style); pyqtgraph, openpyxl, python-docx (MIT); PySide6, rainbow-api (LGPL-3.0); opentfraw (Apache-2.0); brukeropusreader (GPL-3.0).

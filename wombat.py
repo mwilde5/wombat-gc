@@ -118,6 +118,17 @@ class StartWindow(QtWidgets.QWidget):
         n = len(TECHNIQUES)
         grid.addWidget(any_btn, n // 2, n % 2)
         v.addLayout(grid, 1)
+        tools = QtWidgets.QHBoxLayout()
+        tools.setSpacing(10)
+        for title, desc, target in (("Figure maker", "Plots, structures, labels, arrows and captions\n"
+                                                     "on one page, exported as a high-resolution image", "figure"),
+                                    ("Report builder", "Student and client reports with your figures\n"
+                                                       "and tables, exported as PDF or Word", "report")):
+            b = self._card(title, desc, True)
+            b.setMinimumHeight(64)
+            b.clicked.connect(lambda _=False, t=target: self.ctl.open_tool(t))
+            tools.addWidget(b)
+        v.addLayout(tools)
         v.addSpacing(6)
         rec_lab = QtWidgets.QLabel("<b>Recent</b>")
         v.addWidget(rec_lab)
@@ -282,7 +293,19 @@ class AppController(QtCore.QObject):
             QtCore.QTimer.singleShot(150, getattr(w, opener))
         return w
 
+    def open_tool(self, target, path=None):
+        import report_builder
+        w = report_builder.deliver(target, None)
+        if path:
+            (w.open_figure if target == "figure" else w.open_report)(path)
+        return w
+
     def open_path(self, path):
+        low = path.lower()
+        if low.endswith((".wgfig", ".wgreport")):
+            self.start.hide()
+            self.add_recent(path)
+            return self.open_tool("figure" if low.endswith(".wgfig") else "report", path)
         key = detect(path)
         if key is None:
             QtWidgets.QMessageBox.information(self.start, APP_NAME,
@@ -407,7 +430,41 @@ def selftest(ctl, app):
     except Exception:
         ok = False
         print(f"selftest exports: FAILED\n{traceback.format_exc()}", flush=True)
-    for mod in ("nmrglue", "openpyxl", "opentfraw", "brukeropusreader", "rainbow", "scipy.signal", "matplotlib.pyplot"):
+    # report builder (PDF + Word) and figure maker (PNG/TIFF/SVG/PDF)
+    try:
+        import report_builder as rb
+        import figure_maker as fmk
+        png = os.path.join(tmp, "chrom.png")
+        svg = os.path.join(tmp, "chrom.svg")
+        fw = fmk.FigureWindow()
+        fw.insert_file(svg)
+        fw.insert_file(png)
+        fw.insert_text("CDCl₃ keto ⇌ enol", edit=False)
+        fw.scene.addItem(fmk.ArrowItem(QtCore.QPointF(0, 0), QtCore.QPointF(80, 0), "equilibrium"))
+        for ext in (".png", ".tif", ".svg", ".pdf"):
+            fn = os.path.join(tmp, "figure" + ext)
+            fw.export_to(fn, ext, 150)
+            ok_f = os.path.exists(fn) and os.path.getsize(fn) > 0
+            ok &= ok_f
+            print(f"selftest figure {ext}: {'ok' if ok_f else 'EMPTY'}", flush=True)
+        fw.dirty = False
+        fw.close()
+        for tmpl in ("student", "client"):
+            rep = rb.Report(tmpl)
+            with open(png, "rb") as fh:
+                rep.blocks.append(rb.Block("image", "Test figure", png=fh.read(), width_mm=120))
+            rep.blocks.append(rb.Block("table", "Test table", header=["a", "b"], rows=[["1", "2"]]))
+            rep.blocks.append(rb.Block("text", html="<p><sup>1</sup>H NMR (CDCl<sub>3</sub>)</p>"))
+            for ext, fn_ in ((".pdf", rb.export_pdf), (".docx", rb.export_docx)):
+                fn = os.path.join(tmp, f"report_{tmpl}{ext}")
+                fn_(rep, fn)
+                ok_f = os.path.getsize(fn) > 0
+                ok &= ok_f
+                print(f"selftest report {tmpl}{ext}: {'ok' if ok_f else 'EMPTY'}", flush=True)
+    except Exception:
+        ok = False
+        print(f"selftest report/figure: FAILED\n{traceback.format_exc()}", flush=True)
+    for mod in ("docx", "nmrglue", "openpyxl", "opentfraw", "brukeropusreader", "rainbow", "scipy.signal", "matplotlib.pyplot"):
         try:
             importlib.import_module(mod)
             print(f"selftest import {mod}: ok", flush=True)

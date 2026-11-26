@@ -32,11 +32,86 @@ def _fig(width_mm, height_mm):
     return plt.figure(figsize=(width_mm * MM, height_mm * MM), layout="constrained")
 
 
+LEADER = dict(arrowstyle="-", lw=0.5, color="#777777", shrinkA=0, shrinkB=1)
+
+
+def arrange_labels(items, trace_x, trace_y, xlim, ylim, unit_x, unit_y, *, char_px=7.0, height_px=16.0,
+                   gap_px=4.0, fixed=()):
+    """Place peak labels above the trace so they don't overlap the trace or each other.
+
+    items: [(key, apex_x, apex_y, text)]; unit_x / unit_y: data units per pixel (or point);
+    fixed: boxes (left, right, bottom, top) in data units that must be avoided (labels placed by hand).
+    Labels are centred on x with their bottom edge at y.  Returns {key: (x, y) or None} where None
+    means the default place just above the apex is fine.
+    """
+    x0, x1 = xlim
+    y0, y1 = ylim
+    gap = gap_px * unit_y
+    placed = list(fixed)
+    out = {}
+    tx = np.asarray(trace_x, float)
+    ty = np.asarray(trace_y, float)
+
+    def trace_top(l, r):
+        m = (tx >= l) & (tx <= r)
+        if not m.any():
+            return float(np.interp((l + r) / 2, tx, ty))
+        return float(ty[m].max())
+
+    for key, ax_, ay, text in sorted(items, key=lambda it: -it[2]):   # tallest peaks choose first
+        if not (x0 <= ax_ <= x1):
+            out[key] = None
+            continue
+        w = (len(text) * char_px + 8) * unit_x
+        h = height_px * unit_y
+        best = None
+        for step in (0, -1, 1, -2, 2, -3, 3, -4, 4):
+            cx = ax_ + step * w * 0.75
+            l, r = cx - w / 2, cx + w / 2
+            if (l < x0 or r > x1) and step:
+                continue
+            b = max(trace_top(l, r), ay) + gap
+            for _ in range(len(placed) + 1):
+                hit = [p for p in placed if not (r <= p[0] or l >= p[1] or b + h <= p[2] or b >= p[3])]
+                if not hit:
+                    break
+                b = max(p[3] for p in hit) + gap / 2
+            cost = (b - ay) / max(y1 - y0, 1e-12) + abs(step) * 0.08
+            if best is None or cost < best[0]:
+                best = (cost, cx, b)
+        _, cx, b = best
+        placed.append((cx - w / 2, cx + w / 2, b, b + h))
+        out[key] = None if abs(cx - ax_) < 1e-12 and b - ay < gap * 1.5 else (cx, b)
+    return out
+
+
+def label_set(mz, auto_idx, edits):
+    """Apply a user's label edits to the automatically chosen stick labels.
+
+    edits: None or {"add": set(mz), "hide": set(mz), "pos": {mz: (x, y / base peak)}} with m/z values
+    rounded to 4 decimals.  Returns [(index, pos or None)].
+    """
+    if not edits:
+        return [(int(j), None) for j in auto_idx]
+    keys = np.round(np.asarray(mz, float), 4)
+    hide = edits.get("hide", ())
+    out = [int(j) for j in auto_idx if float(keys[j]) not in hide]
+    for k in sorted(edits.get("add", ())):
+        hits = np.nonzero(np.abs(keys - k) < 5e-5)[0]
+        if hits.size and int(hits[0]) not in out:
+            out.append(int(hits[0]))
+    pos = edits.get("pos", {})
+    return [(j, pos.get(float(keys[j]))) for j in out]
+
+
 def chromatogram_figure(path, t, y, *, xlim=None, title="", ylabel="Abundance",
                         peaks=(), shade_peaks=True, label_peaks=True,
                         width_mm=160, height_mm=90, dpi=600, font=9, color="#000000",
-                        markers=()):
-    """markers: iterable of (rt, label) to draw as thin vertical lines (e.g. selected scan)."""
+                        markers=(), peak_labels=None, arrange_labels_=True):
+    """markers: iterable of (rt, label) to draw as thin vertical lines (e.g. selected scan).
+    peak_labels: optional [(apex_rt, apex_y, text, (x, y) or None, placed_by_hand)] - label text and
+    position (None = just above the apex).  Default: retention-time labels.
+    arrange_labels_: re-arrange labels not placed by hand so they don't overlap at this figure size."""
     fig = _fig(width_mm, height_mm)
     ax = fig.add_subplot(111)
     x0, x1 = xlim if xlim else (t[0], t[-1])
@@ -53,14 +128,48 @@ def chromatogram_figure(path, t, y, *, xlim=None, title="", ylabel="Abundance",
         if shade_peaks:
             ax.fill_between(seg_t, base, seg_y, color="#4C78A8", alpha=0.30, lw=0)
             ax.plot([p.t_start, p.t_end], [p.b0, p.b1], lw=0.6, color="#C0392B")
-        if label_peaks:
+        if label_peaks and peak_labels is None:
             ya = float(np.interp(p.rt_apex, t, y))
             ax.annotate(f"{p.rt_apex:.2f}", (p.rt_apex, ya), xytext=(0, 2), textcoords="offset points",
                         ha="center", va="bottom", fontsize=font - 1)
+    top = ymax * (1.10 if label_peaks and peaks else 1.05)
+    if label_peaks and peak_labels:
+        labs = [tuple(lb) + (False,) * (5 - len(lb)) for lb in peak_labels if x0 <= lb[0] <= x1]
+        for lb in labs:
+            if lb[3] is not None and lb[4]:
+                top = max(top, lb[3][1] + ymax * 0.10)
+        if arrange_labels_ and labs:
+            # place everything the user didn't drag by hand for this figure's size and font
+            fpt = font - 1
+            ax.set_xlim(x0, x1)
+            for _ in range(2):
+                ax.set_ylim(ymin, top)
+                fig.canvas.draw()
+                bb = ax.get_window_extent()
+                k = 72.0 / fig.dpi           # display pixels -> points
+                ux, uy = (x1 - x0) / (bb.width * k), (top - ymin) / (bb.height * k)
+                fixed = [(p[0] - (len(tx_) * fpt * 0.6 + 4) * ux / 2, p[0] + (len(tx_) * fpt * 0.6 + 4) * ux / 2,
+                          p[1], p[1] + fpt * 1.3 * uy) for _, _, tx_, p, man in labs if p is not None and man]
+                res = arrange_labels([(i, lb[0], lb[1], lb[2]) for i, lb in enumerate(labs) if not lb[4]],
+                                     t, y, (x0, x1), (ymin, top), ux, uy, char_px=fpt * 0.6, height_px=fpt * 1.3,
+                                     gap_px=2.0, fixed=fixed)
+                need = max([v[1] + fpt * 1.6 * uy for v in res.values() if v is not None], default=top)
+                if need <= top:
+                    break
+                top = need
+            labs = [(lb[0], lb[1], lb[2], lb[3] if lb[4] else res.get(i), lb[4]) for i, lb in enumerate(labs)]
+        for ax_, ay, text, pos, _ in labs:
+            if pos is None:
+                ax.annotate(text, (ax_, ay), xytext=(0, 2), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=font - 1)
+            else:
+                ax.annotate(text, (ax_, ay), xytext=pos, textcoords="data", ha="center", va="bottom",
+                            fontsize=font - 1, arrowprops=LEADER, annotation_clip=False)
+                top = max(top, pos[1] + ymax * 0.10)
     for rt, lab in markers:
         ax.axvline(rt, lw=0.5, ls="--", color="#888888")
     ax.set_xlim(x0, x1)
-    ax.set_ylim(ymin, ymax * (1.10 if label_peaks and peaks else 1.05))
+    ax.set_ylim(ymin, top)
     ax.set_xlabel("Retention time (min)", fontsize=font)
     ax.set_ylabel(ylabel, fontsize=font)
     if title:
@@ -83,8 +192,9 @@ def _pick_labels(mz, inten, n, min_sep):
 
 def spectrum_figure(path, mz, inten, *, xlim=None, title="", relative=True, n_labels=10,
                     decimals=1, width_mm=160, height_mm=90, dpi=600, font=9, color="#000000",
-                    mirror=None, mirror_color="#C82828"):
-    """mirror: optional (label, mz, intensity) library spectrum drawn downwards (head-to-tail plot)."""
+                    mirror=None, mirror_color="#C82828", label_edits=None):
+    """mirror: optional (label, mz, intensity) library spectrum drawn downwards (head-to-tail plot).
+    label_edits: m/z labels the user added, removed or moved (see label_set)."""
     fig = _fig(width_mm, height_mm)
     ax = fig.add_subplot(111)
     mz = np.asarray(mz, float)
@@ -99,15 +209,27 @@ def spectrum_figure(path, mz, inten, *, xlim=None, title="", relative=True, n_la
         y = inten
         ylabel = "Abundance"
     ax.vlines(mz[m], 0, y[m], lw=0.8, color=color)
-    if n_labels and m.any():
-        idx = np.nonzero(m)[0]
-        for k in _pick_labels(mz[idx], y[idx], n_labels, (xlim[1] - xlim[0]) * 0.025):
-            j = idx[k]
-            ax.annotate(f"{mz[j]:.{decimals}f}", (mz[j], y[j]), xytext=(0, 2), textcoords="offset points",
-                        ha="center", va="bottom", fontsize=font - 1)
     ymax = float(y[m].max()) if m.any() else 1.0
+    top = ymax * 1.12
+    if m.any():
+        idx = np.nonzero(m)[0]
+        auto = [idx[k] for k in _pick_labels(mz[idx], y[idx], n_labels, (xlim[1] - xlim[0]) * 0.025)] \
+            if n_labels else []
+        ref = float(y.max()) if y.size else 1.0
+        for j, pos in label_set(mz, auto, label_edits):
+            if not m[j]:
+                continue
+            if pos is None:
+                ax.annotate(f"{mz[j]:.{decimals}f}", (mz[j], y[j]), xytext=(0, 2), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=font - 1)
+            else:
+                xy = (pos[0], pos[1] * ref)
+                ax.annotate(f"{mz[j]:.{decimals}f}", (mz[j], y[j]), xytext=xy, textcoords="data",
+                            ha="center", va="bottom", fontsize=font - 1, arrowprops=LEADER,
+                            annotation_clip=False)
+                top = max(top, xy[1] + ymax * 0.10)
     ax.set_xlim(*xlim)
-    ax.set_ylim(0, ymax * 1.12)
+    ax.set_ylim(0, top)
     if mirror is not None:
         mlabel, lmz, lab = mirror
         lmz, lab = np.asarray(lmz, float), np.asarray(lab, float)
@@ -121,7 +243,7 @@ def spectrum_figure(path, mz, inten, *, xlim=None, title="", relative=True, n_la
                 j = idx[k]
                 ax.annotate(f"{lmz[j]:.0f}", (lmz[j], -ly[j]), xytext=(0, -2), textcoords="offset points",
                             ha="center", va="top", fontsize=font - 1, color=mirror_color)
-        ax.set_ylim(-ymax * 1.34, ymax * 1.12)
+        ax.set_ylim(-ymax * 1.34, top)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{abs(v):g}"))
         ax.text(0.01, 0.98, "Sample", transform=ax.transAxes, ha="left", va="top", fontsize=font - 1)
         ax.text(0.01, 0.02, f"Library: {mlabel}", transform=ax.transAxes, ha="left", va="bottom",

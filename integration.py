@@ -35,6 +35,8 @@ class Peak:
     b0: float            # baseline value at start
     b1: float            # baseline value at end
     note: str = ""
+    label_pos: tuple | None = None   # label position (data coords), None = just above the apex
+    label_manual: bool = False       # True when the user dragged it there (kept as-is in exports)
 
     def baseline_at(self, t):
         if self.t_end == self.t_start:

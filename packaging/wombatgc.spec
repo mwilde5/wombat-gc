@@ -12,7 +12,8 @@ from common import APP_NAME, __version__  # noqa: E402
 app_modules = ["wombat", "common", "gcms_viewer", "gcms_reader", "integration", "plots_export", "tables",
                "export_dialogs", "ms_library", "nist_search", "library_panel", "gcxgc", "gcxgc_view",
                "view_widgets", "view3d", "mesh_export", "colormaps", "nmr", "nmr_view", "spectra",
-               "spectrum_view", "csv_import", "lcms", "lcms_view", "compare_view", "compare_spectra"]
+               "spectrum_view", "csv_import", "lcms", "lcms_view", "compare_view", "compare_spectra",
+               "drag_labels", "report_builder", "figure_maker"]
 hidden = app_modules + collect_submodules("pyqtgraph", filter=lambda m: ".examples" not in m and ".tests" not in m) \
     + collect_submodules("nmrglue", filter=lambda m: ".tests" not in m) \
     + collect_submodules("rainbow") + collect_submodules("brukeropusreader") + collect_submodules("opentfraw") \
@@ -21,9 +22,12 @@ hidden = app_modules + collect_submodules("pyqtgraph", filter=lambda m: ".exampl
        # matplotlib picks its file writer by extension at run time, so PyInstaller can't see these
        "matplotlib.backends.backend_agg", "matplotlib.backends.backend_pdf", "matplotlib.backends.backend_svg",
        "matplotlib.backends.backend_ps", "matplotlib.backends.backend_mixed",
-       "PIL.PngImagePlugin", "PIL.TiffImagePlugin", "PIL.JpegImagePlugin"]
+       "PIL.PngImagePlugin", "PIL.TiffImagePlugin", "PIL.JpegImagePlugin",
+       # reports (Word) and the figure maker
+       "PySide6.QtSvg", "lxml", "lxml.etree"] + collect_submodules("docx")
 datas = collect_data_files("pyqtgraph", excludes=["**/examples/**", "**/tests/**"]) \
-    + collect_data_files("openpyxl") + [(os.path.join(ROOT, "icon.png"), ".")]
+    + collect_data_files("openpyxl") + [(os.path.join(ROOT, "icon.png"), ".")] \
+    + collect_data_files("docx", include_py_files=True)   # python-docx finds its templates via docx/parts/../
 
 a = Analysis(
     [os.path.join(ROOT, "wombat.py")],

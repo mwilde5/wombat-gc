@@ -11,14 +11,99 @@ from export_dialogs import FILTERS, ImageExportDialog
 pg.setConfigOptions(antialias=True, background="w", foreground="#222222")
 
 APP_NAME = "WombatGC"          # one place to rename the app
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 
 def settings():
     return QtCore.QSettings("UoP", "GCMSViewer")
 
 
-class ToolWindow(QtWidgets.QMainWindow):
+class SendMixin:
+    """'Report' menu: add figures, tables and report text from a window to the report builder or the
+    figure maker.  A window lists what it can send in report_sources():
+        [(label, kind, callable)]   kind = "image" | "table" | "text"
+    Images are made by the window's normal image export (its options dialog is shown, then the file
+    goes to the report/figure instead of a Save dialog); tables and text are taken from its
+    'Copy for report' functions."""
+    _send_to = None
+    _send_file = None
+    _send_caption = ""
+
+    def report_sources(self):
+        return []
+
+    def add_report_menu(self, before=None):
+        mb = self.menuBar()
+        m = QtWidgets.QMenu("&Report", mb)
+        if before is not None:
+            mb.insertMenu(before.menuAction() if isinstance(before, QtWidgets.QMenu) else before, m)
+        else:
+            mb.addMenu(m)
+        m.aboutToShow.connect(lambda m=m: self._fill_report_menu(m))
+        self._fill_report_menu(m)
+        return m
+
+    def _fill_report_menu(self, m):
+        m.clear()
+        try:
+            srcs = self.report_sources()
+        except Exception:
+            srcs = []
+        if not srcs:
+            m.addAction("Open some data to add it to a report").setEnabled(False)
+        for label, kind, fn in srcs:
+            m.addAction(f"Add {label} to report…" if kind == "image" else f"Add {label} to report",
+                        lambda k=kind, f=fn: self.send_to("report", k, f))
+        imgs = [(label, fn) for label, kind, fn in srcs if kind == "image"]
+        if imgs:
+            m.addSeparator()
+            for label, fn in imgs:
+                m.addAction(f"Send {label} to the figure maker…", lambda f=fn: self.send_to("figure", "image", f))
+        m.addSeparator()
+        m.addAction("Open report builder", lambda: self._deliver("report", None))
+        m.addAction("Open figure maker", lambda: self._deliver("figure", None))
+
+    def send_target_file(self, ext):
+        """Called from the image-export code while sending: a temporary file instead of a Save dialog."""
+        import tempfile
+        d = os.path.join(tempfile.gettempdir(), "wombatgc-send")
+        os.makedirs(d, exist_ok=True)
+        fd, fn = tempfile.mkstemp(suffix=ext, dir=d)
+        os.close(fd)
+        self._send_file = fn
+        return fn
+
+    def send_to(self, target, kind, fn):
+        import tables
+        if kind == "image":
+            self._send_to, self._send_file, self._send_caption = target, None, ""
+            try:
+                fn()
+            finally:
+                self._send_to = None
+            path = self._send_file
+            if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                self._deliver(target, dict(kind="image", path=path, caption=self._send_caption,
+                                           source=self.windowTitle()))
+            return
+        got = []
+        tables.CAPTURE = lambda **kw: got.append(kw)
+        try:
+            fn()
+        finally:
+            tables.CAPTURE = None
+        if got:
+            got[0]["source"] = self.windowTitle()
+            self._deliver(target, got[0])
+        else:
+            self.statusBar().showMessage("Nothing to add yet", 4000)
+
+    def _deliver(self, target, item):
+        import report_builder
+        report_builder.deliver(target, item, self)
+
+
+class ToolWindow(SendMixin, QtWidgets.QMainWindow):
     """Base window: settings, status bar, sensible size, Home + Help menu entries."""
     sigHome = QtCore.Signal()
     TECHNIQUE = ""
@@ -69,10 +154,15 @@ class ToolWindow(QtWidgets.QMainWindow):
         return fn
 
     def image_target(self, kind, default_title, default_stem, extras=None):
-        dlg = ImageExportDialog(self, kind, default_title, self.settings, extras=extras)
+        dlg = ImageExportDialog(self, kind, default_title, self.settings, extras=extras, send_to=self._send_to)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None, None, None
         opts, use_view = dlg.options()
+        if self._send_to:
+            self._send_caption = opts.get("title", "")
+            if self._send_to == "report":
+                opts["title"] = ""          # the title becomes the figure caption instead
+            return self.send_target_file(dlg.ext), opts, use_view
         fn = self.save_name("Save image", default_stem + dlg.ext, FILTERS[dlg.ext])
         if fn and not os.path.splitext(fn)[1]:
             fn += dlg.ext

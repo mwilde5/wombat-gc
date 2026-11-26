@@ -66,6 +66,7 @@ class SpectrumWindow(ToolWindow):
         pm.addAction("Clear peak labels", self.clear_peaks)
         pm.addAction("Baseline correction", self.baseline_correct)
         hm = mb.addMenu("&Help")
+        self.add_report_menu(before=hm)
         hm.addAction("How to use", self.show_help).setShortcut("F1")
 
         tb = self.addToolBar("Main")
@@ -682,6 +683,19 @@ class SpectrumWindow(ToolWindow):
                 w.writerow([f"{a:.6g}", f"{b:.6g}"])
         self.done(fn)
 
+    def report_sources(self):
+        if self.main is None:
+            return []
+        out = [("the spectrum", "image", self.export_image)]
+        if self.bands:
+            out.append(("the peak table", "table", self.copy_peaks))
+        if getattr(self, "regions", None):
+            out.append(("the integral table", "table", self.copy_regions))
+        rep = getattr(self, "report", None)
+        if rep is not None and hasattr(self, "copy_report") and rep.toPlainText().strip():
+            out.append(("the report text (experimental data)", "text", self.copy_report))
+        return out
+
     def export_image(self):
         if self.main is None:
             return
@@ -889,7 +903,7 @@ class IRWindow(SpectrumWindow):
 
     def copy_report(self):
         plain = self.report.toPlainText()
-        tables.copy_text(plain, self._report_html(plain))
+        tables.copy_text(plain, self.report.toHtml())
         self.status.showMessage("Report copied – paste into Word to keep the formatting", 4000)
 
     def show_help(self):

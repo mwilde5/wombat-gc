@@ -116,8 +116,17 @@ def table_html(header, rows, title=None):
     return "".join(out)
 
 
+# When set (by "Add to report"), copy_table / copy_text hand their content to this callable
+# instead of the clipboard: CAPTURE(kind="table", header=, rows=, title=) or CAPTURE(kind="text", ...).
+CAPTURE = None
+
+
 def copy_table(header, rows, title=None, extra_text=None):
     """Copy as a real table (Word/PowerPoint) and as tab-separated text (Excel)."""
+    if CAPTURE is not None:
+        CAPTURE(kind="table", header=[str(h) for h in header], rows=[[str(v) for v in r] for r in rows],
+                title=title or "", note=extra_text or "")
+        return
     md = QtCore.QMimeData()
     tsv = "\n".join("\t".join(map(str, r)) for r in [header] + list(rows))
     h = table_html(header, rows, title)
@@ -130,6 +139,9 @@ def copy_table(header, rows, title=None, extra_text=None):
 
 
 def copy_text(text, rich=None):
+    if CAPTURE is not None:
+        CAPTURE(kind="text", text=text, html=rich or "")
+        return
     md = QtCore.QMimeData()
     md.setText(text)
     if rich:

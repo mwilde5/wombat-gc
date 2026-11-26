@@ -28,9 +28,10 @@ import view3d
 import plots_export as px
 import tables
 from view_widgets import make_plot
+from drag_labels import DragLabel, arrange as arrange_labels
 from export_dialogs import ImageExportDialog
 
-from common import APP_NAME, __version__
+from common import APP_NAME, __version__, SendMixin
 
 pg.setConfigOptions(antialias=True, background="w", foreground="#222222")
 
@@ -168,7 +169,7 @@ class Model3DDialog(QtWidgets.QDialog):
 # =============================================================================
 # Main window
 # =============================================================================
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(SendMixin, QtWidgets.QMainWindow):
     sigHome = QtCore.Signal()
     sigCompare = QtCore.Signal(list)      # paths of the current run(s) to start a comparison with
     TECHNIQUE = "GC-MS / GC-FID / GCxGC"
@@ -193,6 +194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sel_idx = np.zeros(0, dtype=np.int64)   # scans making up the current spectrum
         self.sel_desc = ""
         self.sel_tag = ""
+        self.spec_edits = {}     # sel_tag -> {"add": set(mz), "hide": set(mz), "pos": {mz: (x, y/base)}}
+        self._spec_lab_idx = []
         self.bkg_idx = None
         self.bkg_desc = ""
         self.fold: gx.Fold | None = None              # GCxGC folding (None = 1D)
@@ -344,7 +347,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_chrom_img = QtWidgets.QPushButton("Image…")
         self.btn_chrom_img.setToolTip("Export the chromatogram as a high-resolution image")
         self.btn_chrom_img.clicked.connect(self.export_chrom_image)
-        chrom_box = self._panel(self.chrom_title, [self.btn_chrom_csv, self.btn_chrom_img], self.chrom_pw)
+        self.btn_chrom_labels = self._chrom_labels_button()
+        chrom_box = self._panel(self.chrom_title, [self.btn_chrom_labels, self.btn_chrom_csv, self.btn_chrom_img],
+                                self.chrom_pw)
 
         # ---- GCxGC panel
         self.gxp = gxv.GCxGCPanel(self.settings)
@@ -390,6 +395,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spec_labels = []
         self.spec_vb.sigRangeChanged.connect(lambda *_: self._label_spectrum())
         self.spec_vb.sigDoubleClick.connect(self._spec_dblclick)
+        self.spec_vb.sigClick.connect(self._spec_click)
         self.spec_title = QtWidgets.QLabel("Mass spectrum")
         self.spec_title.setStyleSheet("font-weight:600;")
         self.spec_title.setWordWrap(True)
@@ -409,8 +415,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_spec_copy = QtWidgets.QPushButton("Copy")
         self.btn_spec_copy.setToolTip("Copy the spectrum as tab-separated m/z / abundance (paste into Excel, NIST MS Search, …)")
         self.btn_spec_copy.clicked.connect(self.copy_spectrum)
+        self.btn_spec_labels = self._spec_labels_button()
         spec_box = self.spec_box = self._panel(self.spec_title,
-                               [self.chk_rel, self.chk_bkg, self.btn_spec_copy, self.btn_spec_csv, self.btn_spec_img],
+                               [self.chk_rel, self.chk_bkg, self.btn_spec_labels, self.btn_spec_copy,
+                                self.btn_spec_csv, self.btn_spec_img],
                                self.spec_pw)
 
         # ---- side tabs: peaks + info
@@ -479,6 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_3d.toggled.connect(self._show_3d)
         vm.addAction("Pop out / dock 3D view", self.toggle_3d_popout)
         hm = mb.addMenu("&Help")
+        self.add_report_menu(before=hm)
         hm.addAction("Mouse && keyboard controls", self.show_help)
         hm.addAction("About", lambda: QtWidgets.QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME}</b> {__version__}<br>GC-MS, GC-FID and GCxGC viewer.<br>"
@@ -554,6 +563,183 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(plot, 1)
         plot.setMinimumSize(250, 110)
         return w
+
+    # ---- label menus (chromatogram peak labels, m/z labels)
+    LABEL_TEXTS = [("number", "Peak number"), ("rt", "Retention time"), ("name", "Name / note"),
+                   ("numname", "Number and name"), ("none", "No labels")]
+
+    def _chrom_labels_button(self):
+        b = QtWidgets.QToolButton()
+        b.setText("Labels")
+        b.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        b.setToolTip("Peak labels: choose the text, tidy overlapping labels, or put them back above the peaks.\n"
+                     "You can also drag any label with the mouse.")
+        m = QtWidgets.QMenu(b)
+        grp = QtGui.QActionGroup(m)
+        cur = self.settings.value("chrom/labeltext", "number")
+        for key, txt in self.LABEL_TEXTS:
+            a = m.addAction(txt)
+            a.setCheckable(True)
+            a.setChecked(key == cur)
+            grp.addAction(a)
+            a.triggered.connect(lambda _=False, k=key: self._set_label_text(k))
+        m.addSeparator()
+        m.addAction("Auto-arrange labels", self.auto_arrange_labels)
+        m.addAction("Put labels back above peaks", self.reset_peak_labels)
+        b.setMenu(m)
+        return b
+
+    def _set_label_text(self, key):
+        self.settings.setValue("chrom/labeltext", key)
+        self._redraw_peaks()
+
+    def _peak_label_text(self, k, p):
+        mode = self.settings.value("chrom/labeltext", "number")
+        if mode == "rt":
+            return f"{p.rt_apex:.2f}"
+        if mode == "name":
+            return p.note or f"{k + 1}"
+        if mode == "numname":
+            return f"{k + 1}  {p.note}".strip()
+        if mode == "none":
+            return ""
+        return f"{k + 1}"
+
+    def _peak_label_moved(self, p, pos):
+        _, ph = self.chrom_vb.viewPixelSize()
+        pw, _ = self.chrom_vb.viewPixelSize()
+        ya = float(np.interp(p.rt_apex, self.run.times, self.trace_y))
+        near = abs(pos[0] - p.rt_apex) < 6 * pw and abs(pos[1] - ya) < 6 * ph
+        p.label_pos = None if near else (float(pos[0]), float(pos[1]))
+        p.label_manual = not near
+        if near:
+            self._redraw_peaks()
+        elif self.chrom_vb.auto_y:
+            self.chrom_vb.fit_y()
+
+    def _visible_peak_labels(self):
+        t, y = self.run.times, self.trace_y
+        out = []
+        for k, p in enumerate(self.peaks):
+            if p.trace_key != self.trace_key:
+                continue
+            txt = self._peak_label_text(k, p)
+            if txt:
+                out.append((k, p, float(np.interp(p.rt_apex, t, y)), txt))
+        return out
+
+    def auto_arrange_labels(self):
+        if self.run is None or self.trace_y is None:
+            return
+        labs = self._visible_peak_labels()
+        if not labs:
+            self.statusBar().showMessage("No peak labels to arrange - integrate some peaks first", 5000)
+            return
+        for _ in range(2):        # second pass after the y-axis has grown to fit raised labels
+            for p in (p for _, p, _, _ in labs):
+                p.label_pos, p.label_manual = None, False
+            res = arrange_labels(self.chrom_vb, [(k, p.rt_apex, ya, txt) for k, p, ya, txt in labs],
+                                 self.run.times, self.trace_y)
+            for k, p, _, _ in labs:
+                p.label_pos = res.get(k)
+            if self.chrom_vb.auto_y:
+                self.chrom_vb.fit_y()
+        self._redraw_peaks()
+        self.statusBar().showMessage("Labels arranged for the current zoom - drag any label to fine-tune", 5000)
+
+    def reset_peak_labels(self):
+        for p in self.peaks:
+            p.label_pos, p.label_manual = None, False
+        if self.chrom_vb.auto_y:
+            self.chrom_vb.fit_y()
+        self._redraw_peaks()
+
+    def _spec_labels_button(self):
+        b = QtWidgets.QToolButton()
+        b.setText("Edit labels")
+        b.setCheckable(True)
+        b.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        b.setToolTip("Turn on, then click a peak in the spectrum to add or remove its m/z label.\n"
+                     "Labels can be dragged at any time. The arrow has more options.")
+        b.toggled.connect(self._spec_edit_toggled)
+        m = QtWidgets.QMenu(b)
+        sub = m.addMenu("Automatic labels")
+        grp = QtGui.QActionGroup(sub)
+        cur = int(self.settings.value("spec/nlabels", 14))
+        for n in (0, 5, 10, 14, 20, 30):
+            a = sub.addAction("None" if n == 0 else f"Top {n} peaks")
+            a.setCheckable(True)
+            a.setChecked(n == cur)
+            grp.addAction(a)
+            a.triggered.connect(lambda _=False, n=n: self._set_spec_nlabels(n))
+        m.addAction("Reset labels for this spectrum", self.reset_spec_labels)
+        m.addAction("Reset labels for all spectra", lambda: self.reset_spec_labels(True))
+        b.setMenu(m)
+        return b
+
+    def _set_spec_nlabels(self, n):
+        self.settings.setValue("spec/nlabels", n)
+        self.settings.setValue("img/nlab", n)
+        self._label_spectrum()
+
+    def _spec_edit_toggled(self, on):
+        if on:
+            self.statusBar().showMessage("Click a peak in the mass spectrum to add or remove its label; "
+                                         "drag labels to move them", 8000)
+        self._label_spectrum()
+
+    def reset_spec_labels(self, everything=False):
+        if everything:
+            self.spec_edits.clear()
+        else:
+            self.spec_edits.pop(self.sel_tag, None)
+        self._label_spectrum()
+
+    def _spec_edit(self, create=False):
+        e = self.spec_edits.get(self.sel_tag)
+        if e is None and create:
+            e = self.spec_edits[self.sel_tag] = {"add": set(), "hide": set(), "pos": {}}
+        return e
+
+    def _spec_click(self, x, _y):
+        if not self.btn_spec_labels.isChecked():
+            return
+        mz = self.cur_spec[0]
+        if self.run is None or mz.size == 0:
+            return
+        x0, x1 = self.spec_vb.viewRange()[0]
+        j = int(np.argmin(np.abs(mz - x)))
+        if abs(mz[j] - x) > (x1 - x0) * 0.015:
+            return
+        self._toggle_spec_label(j)
+
+    def _toggle_spec_label(self, j):
+        e = self._spec_edit(True)
+        key = round(float(self.cur_spec[0][j]), 4)
+        if j in self._spec_lab_idx:
+            if key in e["add"]:
+                e["add"].discard(key)
+            else:
+                e["hide"].add(key)
+            e["pos"].pop(key, None)
+        else:
+            if key in e["hide"]:
+                e["hide"].discard(key)
+            else:
+                e["add"].add(key)
+        self._label_spectrum()
+
+    def _spec_label_moved(self, j, pos):
+        e = self._spec_edit(True)
+        mz = self.cur_spec[0]
+        key = round(float(mz[j]), 4)
+        ref = float(self.spec_y.max()) if self.spec_y.size else 1.0
+        pw, ph = self.spec_vb.viewPixelSize()
+        if abs(pos[0] - mz[j]) < 6 * pw and abs(pos[1] - self.spec_y[j]) < 6 * ph:
+            e["pos"].pop(key, None)
+            self._label_spectrum()
+        else:
+            e["pos"][key] = (float(pos[0]), float(pos[1]) / ref if ref else 0.0)
 
     HINT_1D = ("Switch to <b>Integrate</b> mode (key 2) and drag across a peak. Ctrl+Z undoes the last peak. "
                "Peaks are kept per trace (TIC or each EIC); Area % is within the current trace. "
@@ -1019,7 +1205,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m = (t >= x0) & (t <= x1)
         if not m.any():
             return None
-        return float(self.trace_y[m].min()), float(self.trace_y[m].max())
+        top = float(self.trace_y[m].max())
+        for p in self.peaks:
+            if p.label_pos is not None and p.trace_key == self.trace_key and x0 <= p.label_pos[0] <= x1:
+                top = max(top, p.label_pos[1] * 1.06)
+        return float(self.trace_y[m].min()), top
 
     def reset_zoom(self):
         self.chrom_vb.reset_view()
@@ -1285,6 +1475,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in self.spec_labels:
             self.spec_pw.removeItem(t)
         self.spec_labels = []
+        self._spec_lab_idx = []
         mz = self.cur_spec[0]
         if self.run is None or mz.size == 0:
             return
@@ -1295,14 +1486,22 @@ class MainWindow(QtWidgets.QMainWindow):
         dec = self.run.metadata.get("mz_label_decimals", 1)
         y = self.spec_y
         ymax = y[m].max()
-        for k in px._pick_labels(mz[m], y[m], 14, (x1 - x0) * 0.03):
-            j = m[k]
-            if y[j] < 0.02 * ymax:
+        n_auto = int(self.settings.value("spec/nlabels", 14))
+        auto = [m[k] for k in px._pick_labels(mz[m], y[m], n_auto, (x1 - x0) * 0.03) if y[m[k]] >= 0.02 * ymax] \
+            if n_auto else []
+        ref = float(y.max()) if y.size else 1.0
+        editing = self.btn_spec_labels.isChecked()
+        for j, pos in px.label_set(mz, auto, self._spec_edit()):
+            self._spec_lab_idx.append(j)
+            if not (x0 <= mz[j] <= x1):
                 continue
-            ti = pg.TextItem(f"{mz[j]:.{dec}f}", color="#333333", anchor=(0.5, 1.0))
-            ti.setPos(mz[j], y[j])
-            self.spec_pw.addItem(ti, ignoreBounds=True)
-            self.spec_labels.append(ti)
+            lab = DragLabel(f"{mz[j]:.{dec}f}", (mz[j], y[j]), None if pos is None else (pos[0], pos[1] * ref),
+                            color="#333333", anchor=(0.5, 1.0),
+                            on_moved=lambda q, j=j: self._spec_label_moved(j, q),
+                            on_click=(lambda j=j: self._toggle_spec_label(j)) if editing else None,
+                            tooltip="Click to remove this label" if editing else
+                            "Drag to move this label (Edit labels adds or removes labels)")
+            self.spec_labels += lab.add_to(self.spec_pw)
         if self.mirror is not None:
             _, lmz, lab = self.mirror
             lm = np.nonzero((lmz >= x0) & (lmz <= x1))[0]
@@ -1352,11 +1551,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chrom_pw.addItem(item, ignoreBounds=True)
             bl = pg.PlotDataItem([p.t_start, p.t_end], [p.b0, p.b1], pen=pg.mkPen((192, 57, 43), width=1.3))
             self.chrom_pw.addItem(bl, ignoreBounds=True)
-            ya = float(np.interp(p.rt_apex, t, y))
-            lab = pg.TextItem(f"{k + 1}", color="#1f3b73", anchor=(0.5, 1.2))
-            lab.setPos(p.rt_apex, ya)
-            self.chrom_pw.addItem(lab, ignoreBounds=True)
-            self.peak_items += [item, bl, lab]
+            self.peak_items += [item, bl]
+            txt = self._peak_label_text(k, p)
+            if txt:
+                ya = float(np.interp(p.rt_apex, t, y))
+                lab = DragLabel(txt, (p.rt_apex, ya), p.label_pos, color="#1f3b73", anchor=(0.5, 1.15),
+                                on_moved=lambda q, p=p: self._peak_label_moved(p, q),
+                                tooltip="Drag to move this label (Labels ▸ Auto-arrange tidies them all)")
+                self.peak_items += lab.add_to(self.chrom_pw)
         self._fill_peak_table()
 
     def _fill_peak_table(self):
@@ -1592,6 +1794,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _peak_note_edited(self, item):
         if item.column() == 8 and item.row() < len(self.peaks):
             self.peaks[item.row()].note = item.text()
+            if self.settings.value("chrom/labeltext", "number") in ("name", "numname"):
+                QtCore.QTimer.singleShot(0, self._redraw_peaks)
 
     def delete_selected_peaks(self):
         if self.is2d():
@@ -1667,6 +1871,20 @@ class MainWindow(QtWidgets.QMainWindow):
                         [f"{p.rt_apex:.3f}", f"{p.area:.4g}" if p.area < 1e4 else f"{p.area:.0f}",
                          f"{100 * p.area / totals[p.trace_key]:.2f}" if totals[p.trace_key] else "", p.note])
         return h, rows
+
+    def report_sources(self):
+        if self.run is None:
+            return []
+        out = []
+        if self.is2d():
+            out.append(("the GCxGC 2D plot", "image", self.export_2d_image))
+        else:
+            out.append(("the chromatogram", "image", self.export_chrom_image))
+        if self.run.has_spectra and self.cur_spec[0].size:
+            out.append(("the mass spectrum", "image", self.export_spec_image))
+        if self.blobs if self.is2d() else self.peaks:
+            out.append(("the peak table", "table", self.copy_peaks))
+        return out
 
     def copy_peaks(self):
         if not (self.blobs if self.is2d() else self.peaks):
@@ -1860,11 +2078,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._done(fn)
 
     def _image_target(self, kind, default_title, default_stem, mirror_name=None):
-        dlg = ImageExportDialog(self, kind, default_title, self.settings, mirror_name)
+        dlg = ImageExportDialog(self, kind, default_title, self.settings, mirror_name, send_to=self._send_to)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None, None, None
         opts, use_view = dlg.options()
         self._img_mirror = getattr(dlg, "include_mirror", False)
+        if self._send_to:
+            self._send_caption = opts.get("title", "")
+            if self._send_to == "report":
+                opts["title"] = ""
+            return self.send_target_file(dlg.ext), opts, use_view
         filt = {".png": "PNG (*.png)", ".tif": "TIFF (*.tif *.tiff)", ".svg": "SVG (*.svg)", ".pdf": "PDF (*.pdf)"}[dlg.ext]
         fn = self._save_name("Save image", default_stem + dlg.ext, filt)
         if fn and not os.path.splitext(fn)[1]:
@@ -1882,8 +2105,10 @@ class MainWindow(QtWidgets.QMainWindow):
         xlim = tuple(self.chrom_vb.viewRange()[0]) if use_view else None
         peaks = [p for p in self.peaks if p.trace_key == self.trace_key]
         try:
+            labels = [(p.rt_apex, ya, txt, p.label_pos, p.label_manual)
+                      for _, p, ya, txt in self._visible_peak_labels()]
             px.chromatogram_figure(fn, self.run.times, self.trace_y, xlim=xlim, peaks=peaks,
-                                   ylabel=self.run.signal_label, **opts)
+                                   ylabel=self.run.signal_label, peak_labels=labels, **opts)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, APP_NAME, f"Export failed:\n{e}")
             return
@@ -1906,7 +2131,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._img_mirror and self.mirror is not None:
                 mirror = (mname, self.mirror[1], self.mirror[2])
             px.spectrum_figure(fn, mz, ab, xlim=xlim, decimals=self.run.metadata.get("mz_label_decimals", 1),
-                               mirror=mirror, **opts)
+                               mirror=mirror, label_edits=self._spec_edit(), **opts)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, APP_NAME, f"Export failed:\n{e}")
             return
@@ -1928,6 +2153,9 @@ Right-click: step back out; Home: full view<br><br>
 <b>Other</b><br>
 ← / → (with the chromatogram focused): previous / next scan<br>
 Double-click a peak in the spectrum: plot its extracted ion chromatogram (EIC)<br>
+Drag peak labels and m/z labels to move them; <i>Labels ▸ Auto-arrange</i> tidies peak labels;
+<i>Edit labels</i> (spectrum) then click a peak to add or remove its m/z label<br>
+<i>Report</i> menu: add the chromatogram, spectrum or peak table to a report, or send a plot to the figure maker<br>
 F5: search open libraries · F6: send the spectrum to NIST MS Search<br>
 EIC box accepts several m/z values separated by commas (summed)<br>
 Drag a .D folder or .cdf file onto the window to open it.<br><br>
